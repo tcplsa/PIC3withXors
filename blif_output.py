@@ -17,21 +17,33 @@ class BLIFParserResult:
         self.eq_pairs = {}              # 缓冲器等价映射：输出→输入
         self.constraints = []
 
+# 真值表 → 门类型查找表 (v00,v01,v10,v11) 共16种组合
+# 格式: key=(v00,v01,v10,v11), value=(gate_type, invert_output, (invert_a, invert_b)|None)
+_GATE_LUT = {
+    # 全0 / 全1 → 常量
+    ('0','0','0','0'): ('constraint', False, None),
+    ('1','1','1','1'): ('constraint', True, None),
+    # AND 系: 仅一个位置为1
+    ('1','0','0','0'): ('and', False, (True, True)),    # ~a AND ~b  (仅 00=1)
+    ('0','1','0','0'): ('and', False, (True, False)),   # ~a AND b   (仅 01=1)
+    ('0','0','1','0'): ('and', False, (False, True)),   # a AND ~b   (仅 10=1)
+    ('0','0','0','1'): ('and', False, (False, False)),  # a AND b    (仅 11=1)
+    # AND 系取反: 仅一个位置为0
+    ('0','1','1','1'): ('and', True, (True, True)),     # ~(~a AND ~b)
+    ('1','0','1','1'): ('and', True, (True, False)),    # ~(~a AND b)
+    ('1','1','0','1'): ('and', True, (False, True)),    # ~(a AND ~b)
+    ('1','1','1','0'): ('and', True, (False, False)),   # NAND
+    # XOR / XNOR
+    ('0','1','1','0'): ('xor', False, (False, False)),  # a XOR b
+    ('1','0','0','1'): ('xor', True, (False, False)),   # XNOR
+    # OR / NOR
+    ('1','0','0','0'): ('or', True, (False, False)),    # NOR (= ~a AND ~b, 等价)
+    ('0','1','1','1'): ('or', False, (False, False)),   # a OR b
+}
+
+
 def _identify_gate_type(nm_inputs, rows):
-    """识别2输入门类型：AND/XOR/OR及其反相、输入取反
-
-    返回: (gate_type, invert_output, invert_inputs)
-      - gate_type: 'and' | 'xor' | 'or' | 'constraint' | 'unknown'
-      - invert_output: bool，输出是否取反
-      - invert_inputs: (invert_a, invert_b) | None，各输入是否取反
-
-    支持BLIF中只列出输出为1的行的精简写法，例如:
-      - 11 1  → 标准AND (a AND b)
-      - 10 1  → a AND ~b (第二个输入取反)
-      - 01 1  → ~a AND b (第一个输入取反)
-      - 00 1  → ~a AND ~b (两个输入都取反)
-      - 11 0  → NAND (输出取反)
-    """
+    """识别2输入门类型：AND/XOR/OR及其反相、输入取反 (优化版: LUT + 直接字符比较)"""
     # 0输入 → 常量约束
     if len(nm_inputs) == 0:
         if len(rows) == 1:
@@ -39,8 +51,7 @@ def _identify_gate_type(nm_inputs, rows):
             return 'constraint', value == '1', None
         return 'constraint', False, None
 
-    # 单输入 → 在 blif_input.py 中已转化为 neg_pairs/eq_pairs，不应到达此处
-    # 但为安全保留处理
+    # 单输入
     if len(nm_inputs) == 1:
         if len(rows) == 1:
             row = rows[0]
@@ -49,82 +60,52 @@ def _identify_gate_type(nm_inputs, rows):
             return 'unknown', False, None
         return 'unknown', False, None
 
-    # === 2输入门 ===
-    # 约定：列出value=1的行 → 未列出默认0；列出value=0的行 → 未列出默认1
-    # 即有显式0值行 → 默认值翻转为1
-    has_zero_value = any(
-        (isinstance(e, (list, tuple)) and len(e) >= 2 and e[1] == '0')
-        for e in rows
-    )
-    default_val = '1' if has_zero_value else '0'
-    full_table = {'00': default_val, '01': default_val, '10': default_val, '11': default_val}
+    # === 2输入门: 直接填充真值表，O(1) 查找 ===
+    has_zero = False
+    for e in rows:
+        if isinstance(e, (list, tuple)) and len(e) >= 2 and e[1] == '0':
+            has_zero = True
+            break
+    default = '1' if has_zero else '0'
 
-    def row_matches(pattern, key):
-        return all(pc == '-' or pc == kc for pc, kc in zip(pattern, key))
+    # tt = [v00, v01, v10, v11]
+    tt = [default, default, default, default]
 
     for entry in rows:
         if isinstance(entry, str):
-            pattern = entry
-            value = '1'
+            pat, val = entry, '1'
         elif len(entry) == 2:
-            pattern, value = entry[0], entry[1]
+            pat, val = entry[0], entry[1]
         else:
             continue
 
-        if len(pattern) != 2 or value not in ('0', '1'):
+        if len(pat) != 2 or val not in ('0', '1'):
             continue
-        if all(c in '01-' for c in pattern):
-            for key in full_table:
-                if row_matches(pattern, key):
-                    full_table[key] = value
 
-    v00, v01, v10, v11 = full_table['00'], full_table['01'], full_table['10'], full_table['11']
+        # 直接字符匹配 — 避免 all(zip()) 和函数调用开销
+        p0, p1 = pat[0], pat[1]
+        if p0 not in '01-' or p1 not in '01-':
+            continue
 
-    # 先检查常量约束（全0或全1）
-    if v00 == '0' and v01 == '0' and v10 == '0' and v11 == '0':
-        return 'constraint', False, None           # 输出恒为0
-    if v00 == '1' and v01 == '1' and v10 == '1' and v11 == '1':
-        return 'constraint', True, None            # 输出恒为1
+        if p0 == '-':
+            if p1 == '-':  # -- 匹配全部
+                tt = [val, val, val, val]
+                break
+            elif p1 == '0':  # -0 → idx 0,2
+                tt[0] = tt[2] = val
+            else:            # -1 → idx 1,3
+                tt[1] = tt[3] = val
+        elif p1 == '-':
+            if p0 == '0':    # 0- → idx 0,1
+                tt[0] = tt[1] = val
+            else:            # 1- → idx 2,3
+                tt[2] = tt[3] = val
+        else:
+            # 精确匹配: 00, 01, 10, 11
+            idx = (0 if p0 == '0' else 2) + (0 if p1 == '0' else 1)
+            tt[idx] = val
 
-    # ---- AND 及其所有变种 ----
-    # 核心思路：数"1"的个数来判断门类型
-    # 标准AND: 仅 11→1，其余→0
-    if v11 == '1' and v00 == '0' and v01 == '0' and v10 == '0':
-        return 'and', False, (False, False)       # a AND b
-    if v11 == '0' and v00 == '1' and v01 == '1' and v10 == '1':
-        return 'and', True, (False, False)         # NAND
-
-    # a AND ~b: 仅 10→1，其余→0
-    if v10 == '1' and v00 == '0' and v01 == '0' and v11 == '0':
-        return 'and', False, (False, True)         # a AND ~b
-    if v10 == '0' and v00 == '1' and v01 == '1' and v11 == '1':
-        return 'and', True, (False, True)          # ~(a AND ~b)
-
-    # ~a AND b: 仅 01→1，其余→0
-    if v01 == '1' and v00 == '0' and v10 == '0' and v11 == '0':
-        return 'and', False, (True, False)         # ~a AND b
-    if v01 == '0' and v00 == '1' and v10 == '1' and v11 == '1':
-        return 'and', True, (True, False)          # ~(~a AND b)
-
-    # ~a AND ~b: 仅 00→1，其余→0
-    if v00 == '1' and v01 == '0' and v10 == '0' and v11 == '0':
-        return 'and', False, (True, True)          # ~a AND ~b
-    if v00 == '0' and v01 == '1' and v10 == '1' and v11 == '1':
-        return 'and', True, (True, True)           # ~(~a AND ~b)
-
-    # ---- XOR ----
-    if v00 == '0' and v01 == '1' and v10 == '1' and v11 == '0':
-        return 'xor', False, (False, False)        # a XOR b
-    if v00 == '1' and v01 == '0' and v10 == '0' and v11 == '1':
-        return 'xor', True, (False, False)         # XNOR
-
-    # ---- OR ----
-    if v00 == '0' and v01 == '1' and v10 == '1' and v11 == '1':
-        return 'or', False, (False, False)         # a OR b
-    if v00 == '1' and v01 == '0' and v10 == '0' and v11 == '0':
-        return 'or', True, (False, False)          # NOR
-
-    return 'unknown', False, None
+    return _GATE_LUT.get((tt[0], tt[1], tt[2], tt[3]), ('unknown', False, None))
 
 def _split_names_to_ands_xors(names_blocks):
     """将.names块拆解为AND/XOR/OR门和约束
@@ -198,121 +179,119 @@ def build_not_equiv_classes(neg_pairs, eq_pairs):
     构建非门等价类，每对(a, b)满足a = ~b或b = ~a，归为同一等价类。
     返回: 
         SigPair: OrderedDict{信号名: {可替换信号名: 符号(1/-1)}} （1=等价，-1=相反）
-        sig2rep: dict{信号名: 代表元} （信号→代表元映射）
-        sig2sign: dict{信号名: 符号(1/-1)} （信号相对代表元的符号）
+        sig2rep: dict{信号名: 代表元}
+        sig2sign: dict{信号名: 符号(1/-1)}
     """
-    parent = {}          # 并查集父节点映射：key=信号，value=父节点
-    sig2sign = {}        # 信号相对父节点的符号：key=信号，value=1/-1（初始为1）
+    parent = {}
+    sig2sign = {}
 
     def find(x):
-        """查找代表元，同时更新符号（路径压缩时传递符号）"""
         if x not in parent:
             parent[x] = x
-            sig2sign[x] = 1  # 初始：自身是代表元，符号为1
-        
-        # 路径压缩 + 符号传递
+            sig2sign[x] = 1
         if parent[x] != x:
-            orig_parent = parent[x]
-            root = find(parent[x])  # 递归找根节点
-            # 更新父节点（路径压缩）
+            orig = parent[x]
+            root = find(orig)
             parent[x] = root
-            # 更新符号：x相对根节点的符号 = x相对原父节点的符号 * 原父节点相对根节点的符号
-            sig2sign[x] *= sig2sign[orig_parent]
+            sig2sign[x] *= sig2sign[orig]
         return parent[x]
 
     def union(x, y, sign):
-        """合并x和y（x = ~y），维护符号关系"""
-        px = find(x)  # x的代表元
-        py = find(y)  # y的代表元
+        px, py = find(x), find(y)
         if px != py:
-            # 合并：将py的父节点设为px，同时记录y相对px的符号（y = ~x → y的符号 = -1 * x的符号）
             parent[py] = px
-            if sign == 1:
-                # x的符号是sig2sign[x]（相对px），y = ~x → y相对px的符号 = -sig2sign[x]
-                sig2sign[py] = -sig2sign[x]
-            else:
-                # x的符号是sig2sign[x]，y = x → y相对px的符号 = sig2sign[x]
-                sig2sign[py] = sig2sign[x]
+            sig2sign[py] = -sig2sign[x] if sign else sig2sign[x]
 
-    # 初始化并合并所有非门对
     for a, b in neg_pairs.items():
-        # a = ~b → 合并a和b，维护符号关系
         union(a, b, 1)
 
     for a, b in eq_pairs.items():
-        # a = b → 合并a和b，维护符号关系
         union(a, b, 0)
-    
-    # 第一步：先按代表元收集等价类（所有信号+符号）
-    root2sigs = OrderedDict()  # 代表元: {信号: 符号}
-    all_signals = set(list(neg_pairs.keys()) + list(neg_pairs.values()) + list(eq_pairs.keys()) + list(eq_pairs.values()))
+
+    # 收集所有涉及信号 (用 set.update 避免列表拼接拷贝)
+    all_signals = set(neg_pairs)
+    all_signals.update(neg_pairs.values())
+    all_signals.update(eq_pairs)
+    all_signals.update(eq_pairs.values())
+
+    # 按代表元分组
+    root2sigs = {}
     for x in all_signals:
-        px = find(x)  # 确保路径压缩和符号更新完成
+        px = find(x)
         if px not in root2sigs:
             root2sigs[px] = OrderedDict()
         root2sigs[px][x] = sig2sign[x]
 
-    # 第二步：构建SigPair（每个信号都作为键，对应其等价类的所有可替换信号+符号）
+    # 构建 SigPair 和 sig2rep (一次遍历等价类)
     SigPair = OrderedDict()
-    for sig in all_signals:
-        # 找到当前信号的代表元，获取整个等价类的信号+符号
-        root = find(sig)
-        class_sigs = root2sigs[root]
-        
-        # 计算当前信号相对等价类中每个信号的符号
-        sig2other = OrderedDict()
-        sig_self_sign = sig2sign[sig]  # 当前信号相对代表元的符号
-        for other_sig, other_sign in class_sigs.items():
-            if other_sig != sig:
-                # 符号规则：other_sig 相对 sig 的符号 = other_sign / sig_self_sign（即 other_sig = sign * sig）
-                sign = other_sign / sig_self_sign  # 1/-1（因为都是±1，等价于相乘）
-                sig2other[other_sig] = int(sign)  # 转为整数
-        
-        SigPair[sig] = sig2other
-
-    # 信号到代表元的映射
-    sig2rep = {x: find(x) for x in all_signals}
+    sig2rep = {}
+    for root, class_sigs in root2sigs.items():
+        # class_sigs: {sig: sign_relative_to_root}
+        for sig, self_sign in class_sigs.items():
+            sig2rep[sig] = root
+            other_map = OrderedDict()
+            for other_sig, other_sign in class_sigs.items():
+                if other_sig != sig:
+                    # other 相对 sig 的符号 = other_sign * self_sign (都是±1, 乘除等价)
+                    other_map[other_sig] = other_sign * self_sign
+            SigPair[sig] = other_map
 
     return SigPair, sig2rep, sig2sign
 
 def kahn_layering(inputs, outputs, ands, xors, ors, sig2rep):
     """
-    Kahn算法分层，inputs为起点，返回每个信号的层级dict。
-    ands/xors/ors 格式: [(output, in1, in2, invert_output, (invert_in1, invert_in2))]
+    Kahn算法分层，inputs为起点，返回每个信号的层级dict (优化版)。
     """
-    graph = defaultdict(list)
-    indegree = defaultdict(int)
+    graph = {}
+    indegree = {}
+    _get = sig2rep.get  # local ref 加速
 
-    for gate_info in ands + xors + ors:
+    # 合并所有门一次遍历
+    for gate_info in ands:
         o, i1, i2 = gate_info[0], gate_info[1], gate_info[2]
-        of = sig2rep.get(o, o)
-        i1f = sig2rep.get(i1, i1)
-        i2f = sig2rep.get(i2, i2)
-        graph[i1f].append(of)
-        graph[i2f].append(of)
-        indegree[of] += 2
-        indegree.setdefault(i1f, 0)
-        indegree.setdefault(i2f, 0)
+        of = _get(o, o); i1f = _get(i1, i1); i2f = _get(i2, i2)
+        graph.setdefault(i1f, []).append(of)
+        graph.setdefault(i2f, []).append(of)
+        indegree[of] = indegree.get(of, 0) + 2
+        indegree.setdefault(i1f, 0); indegree.setdefault(i2f, 0)
+
+    for gate_info in xors:
+        o, i1, i2 = gate_info[0], gate_info[1], gate_info[2]
+        of = _get(o, o); i1f = _get(i1, i1); i2f = _get(i2, i2)
+        graph.setdefault(i1f, []).append(of)
+        graph.setdefault(i2f, []).append(of)
+        indegree[of] = indegree.get(of, 0) + 2
+        indegree.setdefault(i1f, 0); indegree.setdefault(i2f, 0)
+
+    for gate_info in ors:
+        o, i1, i2 = gate_info[0], gate_info[1], gate_info[2]
+        of = _get(o, o); i1f = _get(i1, i1); i2f = _get(i2, i2)
+        graph.setdefault(i1f, []).append(of)
+        graph.setdefault(i2f, []).append(of)
+        indegree[of] = indegree.get(of, 0) + 2
+        indegree.setdefault(i1f, 0); indegree.setdefault(i2f, 0)
 
     for inp in inputs:
-        indegree.setdefault(sig2rep.get(inp, inp), 0)
+        indegree.setdefault(_get(inp, inp), 0)
     for out in outputs:
-        indegree.setdefault(sig2rep.get(out, out), 0)
+        indegree.setdefault(_get(out, out), 0)
 
     # Kahn拓扑排序分层
     layer = {}
     queue = deque()
-    for node in indegree:
-        if indegree[node] == 0:
+    for node, deg in indegree.items():
+        if deg == 0:
             queue.append(node)
             layer[node] = 0
     while queue:
         u = queue.popleft()
-        for v in graph[u]:
-            indegree[v] -= 1
-            if indegree[v] == 0:
+        ul = layer[u] + 1
+        for v in graph.get(u, ()):
+            d = indegree[v] - 1
+            indegree[v] = d
+            if d == 0:
                 queue.append(v)
-                layer[v] = layer[u] + 1
+                layer[v] = ul
     return layer
 
 def assign_vars_by_layer(layer_dict, sig2rep):
@@ -431,39 +410,6 @@ def parse_blif_with_layered_vars(blif_path):
             raise KeyError(f"信号{resolved_sig}未分配编号")
         return var
 
-    def update_var_number(target_sig, new_var, name2var, SigPair, sig2rep, sig2sign):
-        """
-        直接修改name2var中target_sig的编号，并同步所有等价/相反信号的编号。
-        target_sig: 目标信号名（不带~）
-        new_var: 新的编号（正整数）
-        name2var: {信号名: 变量编号}
-        SigPair: {信号名: {等价/相反信号: 符号}}
-        sig2rep: {信号名: 代表元}
-        sig2sign: {信号名: 符号(1/-1)}
-        """
-        # 先更新自身
-        name2var[target_sig] = new_var
-        # 找到target_sig的等价类（所有等价/相反信号）
-        if target_sig not in SigPair:
-            return
-
-        # 更新等价/相反信号
-        for other_sig, sign in SigPair[target_sig].items():
-            name2var[other_sig] = new_var * sign
-        # 还要保证代表元的编号也同步
-        rep = sig2rep[target_sig]
-        if rep != target_sig:
-            # 代表元编号 = new_var * (sig2sign[rep] / sig2sign[target_sig])
-            sign = sig2sign[rep] // sig2sign[target_sig]
-            name2var[rep] = new_var * sign
-        # 反向：如果有信号的等价类包含target_sig，也要同步（防止SigPair只单向）
-        for sig, others in SigPair.items():
-            if sig == target_sig:
-                continue
-            if target_sig in others:
-                sign = others[target_sig]
-                name2var[sig] = new_var * sign
-    
     # 映射输入、输出、锁存器
     # print("latches:",latches)
 
@@ -492,10 +438,18 @@ def parse_blif_with_layered_vars(blif_path):
     for inp in inputs:
         signals_to_fix.add(inp)
     # 在映射任何门之前，先将它们统一设置为正
+    # 预先构建 SigPair 反向索引，避免 update_var_number 中 O(n²) 遍历
+    rev_index = {}
+    for sig, others in SigPair.items():
+        for other in others:
+            if other not in rev_index:
+                rev_index[other] = []
+            rev_index[other].append(sig)
+
     for sig in signals_to_fix:
         resolved = _resolve_equivalence(sig, eq_pairs)
         if resolved in name2var and name2var[resolved] < 0:
-            update_var_number(resolved, abs(name2var[resolved]), name2var, SigPair, sig2rep, sig2sign)
+            update_var_number(resolved, abs(name2var[resolved]), name2var, SigPair, sig2rep, sig2sign, rev_index)
 
     # 第二轮：直接根据 neg_pairs 修正逆变器信号的符号
     # SigPair 在多跳合并时符号会出错，所以用原始 neg_pairs 直接修正
@@ -615,6 +569,43 @@ def parse_blif_with_layered_vars(blif_path):
     return result
 
 
+
+
+
+def update_var_number(target_sig, new_var, name2var, SigPair, sig2rep, sig2sign, _rev_index=None):
+    """
+    直接修改name2var中target_sig的编号，并同步所有等价/相反信号的编号。
+    _rev_index: 预先构建的反向索引 {信号: [包含该信号的其他信号列表]}，避免O(n²)
+    """
+    # 先更新自身
+    name2var[target_sig] = new_var
+    # 找到target_sig的等价类（所有等价/相反信号）
+    if target_sig not in SigPair:
+        return
+
+    # 更新等价/相反信号
+    for other_sig, sign in SigPair[target_sig].items():
+        name2var[other_sig] = new_var * sign
+    # 还要保证代表元的编号也同步
+    rep = sig2rep[target_sig]
+    if rep != target_sig:
+        sign = sig2sign[rep] // sig2sign[target_sig]
+        name2var[rep] = new_var * sign
+
+    # 反向索引：使用预构建的索引避免 O(n²) 遍历
+    if _rev_index is not None and target_sig in _rev_index:
+        for sig in _rev_index[target_sig]:
+            if sig in SigPair and target_sig in SigPair[sig]:
+                sign = SigPair[sig][target_sig]
+                name2var[sig] = new_var * sign
+    else:
+        # 无索引时回退到 O(n) 遍历（兼容旧调用）
+        for sig, others in SigPair.items():
+            if sig == target_sig:
+                continue
+            if target_sig in others:
+                sign = others[target_sig]
+                name2var[sig] = new_var * sign
 
 if __name__ == '__main__':
     import sys

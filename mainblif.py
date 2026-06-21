@@ -3,8 +3,10 @@ import os
 import shutil
 # from Aiger import *
 from PDRblif import *
+# 默认使用C++快速解析器（与Python版完全一致）
+# from blif_fast_reader import parse_blif_with_layered_vars
+# 如需切回Python版: 注释上行，取消注释下行
 from blif_output import parse_blif_with_layered_vars
-import time
 
 
 show_aig = 0
@@ -203,13 +205,47 @@ def write_log_to_file(log, dst_file_path, result, total_elapsed):
 
 
 
+def _pdr_blif_worker(blif, seed, solver_backend, result_queue):
+    """Portfolio worker: 用指定 seed 跑 PDR，结果放入 queue"""
+    import random
+    import os
+    random.seed(seed)
+    os.environ["BLIF_SOLVER_BACKEND"] = solver_backend
+    start = time.perf_counter()
+    result, log = pdr_main(blif)
+    elapsed = time.perf_counter() - start
+    result_queue.put((result, log, elapsed, seed))
+
+
 def main(args):
-    # 默认文件路径（可通过命令行参数覆盖）
-    filepath = "/home/lyj238/wdl/IC3/test.blif"
-    filepath = "/home/lyj238/wdl/IC3/pipeLinedAdder_final.blif"
-    # filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/6s173.blif"
-    if args:  # 如果传入命令行参数，使用第一个参数作为文件路径
-        filepath = args[0]
+    # 解析参数
+    solver_backend = "auto"  # auto, cmsat, minisat
+    filepath = None
+    parallel = 10
+    base_seed = None
+    
+    i = 0
+    while i < len(args):
+        if args[i] == "--solver" and i + 1 < len(args):
+            solver_backend = args[i + 1]
+            i += 2
+        elif args[i] == "--parallel" and i + 1 < len(args):
+            parallel = int(args[i + 1])
+            i += 2
+        elif args[i] == "--seed" and i + 1 < len(args):
+            base_seed = int(args[i + 1])
+            i += 2
+        else:
+            filepath = args[i]
+            i += 1
+    
+    if filepath is None:
+        # filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/bc57sensorsp0.blif"
+        filepath = "/home/lyj238/wdl/data/hardproblems-blif-xor/design_aiger_0508.blif"
+    
+    # 通过环境变量传递后端选择给 Class.py
+    os.environ["BLIF_SOLVER_BACKEND"] = solver_backend
+    print(f"Solver backend: {solver_backend}")
     
     filename, ext = get_file_extension(filepath)
     print("filename=", filename)
@@ -222,19 +258,55 @@ def main(args):
 
 
     
-    # 2. 执行 PDR 算法
-    start_time = time.perf_counter()
-    result = -1  # 初始化结果
-    log = None
-
+    # 解析 BLIF（portfolio 模式只需解析一次）
     if ext == '.blif':
+        print("正在解析 BLIF...")
+        pre_start_time = time.perf_counter()
         blif = parse_blif_with_layered_vars(filepath)
-        result, log = pdr_main(blif)
-        
+        pre_end_time = time.perf_counter()
+        pre_time = pre_end_time - pre_start_time
+        print(f"BLIF 解析完成 ({pre_time:.2f}s)")
     else:
-        print("请输入正确的文件格式（.aig 或 .aag）")
+        print("请输入正确的文件格式（.blif）")
         return
-    
+
+    if parallel > 1:
+        # ---- Portfolio 模式：并行 N 组 PDR，最快解完则结束 ----
+        from multiprocessing import Process, Queue
+        import random as _random
+        print(f"Portfolio 模式: {parallel} 条并行")
+        if base_seed is None:
+            base_seed = _random.randint(0, 2 ** 31 - 1)
+            print(f"  自动基种子: {base_seed}")
+        else:
+            print(f"  基种子: {base_seed}")
+
+        q = Queue()
+        procs = []
+        for i in range(parallel):
+            seed = base_seed + i
+            p = Process(target=_pdr_blif_worker, args=(blif, seed, solver_backend, q))
+            procs.append(p)
+            p.start()
+
+        result, log, elapsed, winner_seed = q.get()  # 等第一个完成
+        for p in procs:
+            p.terminate()
+        for p in procs:
+            p.join()
+        print(f"  Winner: seed={winner_seed}, elapsed={elapsed:.3f}s")
+        total_elapsed = time.perf_counter() - pre_start_time
+
+    else:
+        # ---- 单实例模式 ----
+        start_time = time.perf_counter()
+        if base_seed is not None:
+            import random as _random
+            _random.seed(base_seed)
+            print(f"单实例模式: seed={base_seed}")
+        result, log = pdr_main(blif)
+        total_elapsed = time.perf_counter() - start_time
+
     # 输出执行结果
     if result == 20:
         print("The design is SAFE")
@@ -242,9 +314,8 @@ def main(args):
         print("The design is UNSAFE")
     else:
         print("UnSolved")
-    
-    end_time = time.perf_counter()
-    total_elapsed = end_time - start_time
+
+    print(f"Preprocessing time: {pre_time:.6f} seconds")
     print(f"Elapsed time: {total_elapsed:.6f} seconds")
     
     # 3. 移动文件到 tested_files

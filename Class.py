@@ -23,26 +23,17 @@ class Variable:
 
 class SATSolver:
     
-    def __init__(self):
-        # MiniSat C++ 封装后端
+    def __init__(self, backend=None):
+        if backend is None:
+            # 从环境变量读取后端选择 (方便外部切换而不改代码)
+            backend = os.environ.get("BLIF_SOLVER_BACKEND", "auto")
         self.clauses = []
         self.current_clause = []
         self.assumptions = []
         self.pre_assumptions = []
         self.max_variable = 0
         self.simplified_cnf = []
-        try:
-            # 使用绝对路径加载（避免相对路径陷阱）
-            lib_path = os.path.abspath("/home/lyj238/wdl/IC3/libminisat_wrapper.so")
-            self.lib = ctypes.CDLL(lib_path)
-            self._setup_lib_functions()
-            self.solver = self.lib.minisat_create()
-            self.backend = "minisat"
-        except Exception as e:
-            # 打印详细错误（如文件不存在、符号缺失等）
-            print(f"初始化错误：{str(e)}")
-            # 可选：如果加载失败，终止程序（避免后续错误）
-            raise  # 抛出异常，停止执行
+        self.solver = None
         
         # 通用常量
         self.SAT = 1
@@ -54,9 +45,77 @@ class SATSolver:
         self.var_values = {}
         self.failed_assumptions = []
         self.clear_flag = False
+        
+        # 求解器初始化
+        if backend == "minisat":
+            self._init_minisat()
+        elif backend == "cmsat" or backend == "auto":
+            try:
+                self._init_cryptominisat()
+            except Exception as e:
+                if backend == "cmsat":
+                    print(f"CryptoMiniSat初始化失败：{str(e)}")
+                    raise
+                else:
+                    # auto模式下CMS失败则回退到MiniSat
+                    print(f"CryptoMiniSat不可用({str(e)}), 回退到MiniSat")
+                    self._init_minisat()
+        else:
+            raise ValueError(f"未知后端: {backend}, 可选: cmsat, minisat, auto")
+
+    def _init_cryptominisat(self):
+        """初始化 CryptoMiniSat 后端"""
+        cms_lib_path = os.path.abspath(
+            "/home/lyj238/wdl/blif/cryptominisat/build/lib/libcryptominisat5.so"
+        )
+        ctypes.CDLL(cms_lib_path, mode=ctypes.RTLD_GLOBAL)
+        
+        lib_path = os.path.abspath("/home/lyj238/wdl/blif/libcmsat_wrapper.so")
+        self.lib = ctypes.CDLL(lib_path)
+        self._setup_cmsat_functions()
+        self.solver = self.lib.cmsat_create()
+        seed_str = os.environ.get("CMSAT_SEED", "")
+        if seed_str:
+            self.lib.cmsat_set_seed(self.solver, int(seed_str))
+        self.backend = "cmsat"
     
-    def _setup_lib_functions(self):
-        """设置 C++ 库函数原型"""
+    def _init_minisat(self):
+        """初始化 MiniSat 后端"""
+        lib_path = os.path.abspath("/home/lyj238/wdl/IC3/libminisat_wrapper.so")
+        self.lib = ctypes.CDLL(lib_path)
+        self._setup_minisat_functions()
+        self.solver = self.lib.minisat_create()
+        self.backend = "minisat"
+    
+    def _setup_cmsat_functions(self):
+        """设置 CryptoMiniSat C++ 库函数原型"""
+        self.lib.cmsat_create.restype = ctypes.c_void_p
+        self.lib.cmsat_destroy.argtypes = [ctypes.c_void_p]
+        self.lib.cmsat_add_clause.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        self.lib.cmsat_add_clause.restype = ctypes.c_bool
+        self.lib.cmsat_solve.argtypes = [ctypes.c_void_p]
+        self.lib.cmsat_solve.restype = ctypes.c_int
+        self.lib.cmsat_solve_with_assumptions.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        self.lib.cmsat_solve_with_assumptions.restype = ctypes.c_int
+        self.lib.cmsat_model_value.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.lib.cmsat_model_value.restype = ctypes.c_int
+        self.lib.cmsat_max_var.argtypes = [ctypes.c_void_p]
+        self.lib.cmsat_max_var.restype = ctypes.c_int
+        self.lib.cmsat_get_conflict.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+        self.lib.cmsat_get_conflict.restype = ctypes.POINTER(ctypes.c_int)
+        self.lib.cmsat_var_enlarge_to.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.lib.cmsat_var_enlarge_to.restype = None
+        self.lib.cmsat_simplify.argtypes = [ctypes.c_void_p]
+        self.lib.cmsat_simplify.restype = None
+        self.lib.cmsat_add_xor_gate.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
+        self.lib.cmsat_add_xor_gate.restype = ctypes.c_bool
+        self.lib.cmsat_add_xor_clause_lits.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_bool]
+        self.lib.cmsat_add_xor_clause_lits.restype = ctypes.c_bool
+        self.lib.cmsat_set_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        self.lib.cmsat_set_seed.restype = None
+
+    def _setup_minisat_functions(self):
+        """设置 MiniSat C++ 库函数原型"""
         self.lib.minisat_create.restype = ctypes.c_void_p
         self.lib.minisat_destroy.argtypes = [ctypes.c_void_p]
         self.lib.minisat_add_clause.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
@@ -81,44 +140,43 @@ class SATSolver:
         self.lib.minisat_perform_simplify.restype = None
         self.lib.minisat_get_raw_cnf.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
         self.lib.minisat_get_raw_cnf.restype = ctypes.POINTER(ctypes.c_int)
-    # def _setup_python_backend(self):
-    #     """设置纯 Python 后端"""
-    #     self.clauses = []
-    #     self.current_clause = []
-    #     self.assumptions = []
-    #     self.max_variable = 0
-    
+        self.lib.minisat_freeze_var.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.lib.minisat_freeze_var.restype = None
+        self.lib.minisat_unfreeze_var.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.lib.minisat_unfreeze_var.restype = None
+
     def __del__(self):
         """析构函数"""
-        if hasattr(self, 'solver') and self.solver and self.backend == "minisat":
-            self.lib.minisat_destroy(self.solver)
+        if hasattr(self, 'solver') and self.solver:
+            if self.backend == "cmsat":
+                self.lib.cmsat_destroy(self.solver)
+            elif self.backend == "minisat":
+                self.lib.minisat_destroy(self.solver)
     
     def simplify(self) -> List[int]:
-
-        if self.backend != "minisat":
-            print("Warning: simplify only supported for minisat backend")
-            return []
-        
-        # 调用 C++ 后端的简化函数
-        out_size = ctypes.c_int()
-        simplified_ptr = self.lib.minisat_simplify(self.solver, ctypes.byref(out_size))
-        
-        # 将结果转换为 Python 列表
-        self.simplified_cnf = []
-        if out_size.value > 0:
-            self.simplified_cnf = [simplified_ptr[i] for i in range(out_size.value)]
-            
-            # 释放 C++ 端分配的内存
-            self.lib.minisat_free_simplified_cnf(simplified_ptr)
-        
-        return self.simplified_cnf
+        if self.backend == "cmsat":
+            self.lib.cmsat_simplify(self.solver)
+            self.simplified_cnf = []
+            for clause in self.clauses:
+                for lit in clause:
+                    self.simplified_cnf.append(lit)
+                self.simplified_cnf.append(0)
+            return self.simplified_cnf
+        else:
+            # MiniSat
+            out_size = ctypes.c_int()
+            simplified_ptr = self.lib.minisat_simplify(self.solver, ctypes.byref(out_size))
+            self.simplified_cnf = []
+            if out_size.value > 0:
+                self.simplified_cnf = [simplified_ptr[i] for i in range(out_size.value)]
+                self.lib.minisat_free_simplified_cnf(simplified_ptr)
+            return self.simplified_cnf
     
     def perform_simplify(self) -> None:
-        """
-        仅执行简化，不获取简化后的 CNF（性能更好）
-        适用于只需要简化效果而不需要获取具体 CNF 的场景
-        """
-        if self.backend == "minisat":
+        """仅执行简化，不获取简化后的 CNF（性能更好）"""
+        if self.backend == "cmsat":
+            self.lib.cmsat_simplify(self.solver)
+        else:
             self.lib.minisat_perform_simplify(self.solver)
     
     def get_simplified_cnf(self) -> List[int]:
@@ -151,12 +209,10 @@ class SATSolver:
         扩展变量到至少 v 个（确保变量索引 1 到 v 都存在）
         参数 v: 目标变量数量（DIMACS 格式，从 1 开始）
         """
-        if self.backend == "minisat":
-            # 调用 C++ 后端的变量扩展函数
+        if self.backend == "cmsat":
+            self.lib.cmsat_var_enlarge_to(self.solver, v)
+        else:
             self.lib.minisat_var_enlarge_to(self.solver, v)
-            # self.lib.minisat_var_enlarge_to(self.solver, 1000)
-        
-        # 更新 Python 端的最大变量记录
         if v > self.max_variable:
             self.max_variable = v
             
@@ -167,10 +223,7 @@ class SATSolver:
         """
         # print("add_cls: ", dimacs_lit)
         if dimacs_lit == 0:
-            
-
-
-            return self._minisat_add_current_clause()
+            return self._add_current_clause()
         else:
             self.current_clause.append(dimacs_lit)
             var = abs(dimacs_lit)
@@ -178,16 +231,18 @@ class SATSolver:
                 self.max_variable = var
             return True
     
-    def _minisat_add_current_clause(self) -> bool:
-        """MiniSat 后端：添加当前子句"""
+    def _add_current_clause(self) -> bool:
+        """添加当前子句到后端"""
         self.clauses.append(self.current_clause.copy())
         if not self.current_clause:
             return False
-            
         arr = (ctypes.c_int * len(self.current_clause))()
         for i, lit in enumerate(self.current_clause): 
             arr[i] = lit
-        result = self.lib.minisat_add_clause(self.solver, arr, len(self.current_clause))
+        if self.backend == "cmsat":
+            result = self.lib.cmsat_add_clause(self.solver, arr, len(self.current_clause))
+        else:
+            result = self.lib.minisat_add_clause(self.solver, arr, len(self.current_clause))
         self.current_clause.clear()
         return result
     
@@ -206,11 +261,40 @@ class SATSolver:
     def solve(self, simplify: bool = True) -> int:
         for assume in self.assumptions:
             self.pre_assumptions.append(assume)
-        return self._minisat_solve(simplify)
+        
+        if self.backend == "cmsat":
+            return self._cmsat_solve()
+        else:
+            return self._minisat_solve(simplify)
+    
+    def _cmsat_solve(self) -> int:
+        """CryptoMiniSat 后端求解"""
+        if self.assumptions:
+            arr = (ctypes.c_int * len(self.assumptions))()
+            for i, lit in enumerate(self.assumptions): 
+                arr[i] = lit
+            result = self.lib.cmsat_solve_with_assumptions(self.solver, arr, len(self.assumptions))
+        else:
+            result = self.lib.cmsat_solve(self.solver)
+        self.assumptions.clear()
+        
+        if result == 10:
+            self.solve_result = self.SAT
+            self._get_model()
+            self.failed_assumptions.clear()
+        elif result == 20:
+            self.solve_result = self.UNSAT
+            self.var_values.clear()
+            self._get_failed_assumptions()
+        else:
+            print("wrong")
+            self.solve_result = self.UNKNOWN
+            self.var_values.clear()
+            self.failed_assumptions.clear()
+        return self.solve_result
     
     def _minisat_solve(self, simplify: bool = True) -> int:
         """MiniSat 后端求解"""
-        # 设置假设
         if self.assumptions:
             self.lib.minisat_clear_assumptions(self.solver)
             arr = (ctypes.c_int * len(self.assumptions))()
@@ -220,52 +304,55 @@ class SATSolver:
         else:
             self.lib.minisat_clear_assumptions(self.solver)
         self.assumptions.clear()
-        # 求解
+        
         result = self.lib.minisat_solve(self.solver, ctypes.c_bool(simplify))
         
-        if result == 10:  # SAT
+        if result == 10:
             self.solve_result = self.SAT
-            self._minisat_get_model()
+            self._get_model()
             self.failed_assumptions.clear()
-        elif result == 20:  # UNSAT
+        elif result == 20:
             self.solve_result = self.UNSAT
             self.var_values.clear()
-            self._minisat_get_failed_assumptions()
+            self._get_failed_assumptions()
         else:
             print("wrong")
             self.solve_result = self.UNKNOWN
             self.var_values.clear()
             self.failed_assumptions.clear()
-        
         return self.solve_result
     
-    def _minisat_get_model(self):
-        """MiniSat 后端获取模型"""
+    def _get_model(self):
+        """获取模型"""
         self.var_values = {}
-        max_var = self.lib.minisat_max_var(self.solver)
-        for var in range(1, max_var + 1):
-            value = self.lib.minisat_model_value(self.solver, var - 1)
-            if value != 0: 
-                self.var_values[var] = (value == 1)
+        if self.backend == "cmsat":
+            max_var = self.lib.cmsat_max_var(self.solver)
+            for var in range(1, max_var + 1):
+                value = self.lib.cmsat_model_value(self.solver, var)
+                if value != 0: 
+                    self.var_values[var] = (value == 1)
+        else:
+            max_var = self.lib.minisat_max_var(self.solver)
+            for var in range(1, max_var + 1):
+                value = self.lib.minisat_model_value(self.solver, var - 1)
+                if value != 0: 
+                    self.var_values[var] = (value == 1)
     
-    def _minisat_get_failed_assumptions(self):
-        """MiniSat 后端获取失败假设"""
+    def _get_failed_assumptions(self):
+        """获取失败假设"""
         out_size = ctypes.c_int()
-        failed_ptr = self.lib.minisat_get_failed_assumptions(self.solver, ctypes.byref(out_size))
+        self.failed_assumptions = set()
         
-        self.failed_assumptions = []
-        if out_size.value > 0:
-            self.failed_assumptions = {failed_ptr[i] for i in range(out_size.value)}
-    
-    # def _python_solve(self) -> int:
-    #     """Python 后端求解（简化实现）"""
-    #     # 这里应该实现一个真正的 Python SAT 求解器
-    #     # 目前返回 UNKNOWN 表示需要 C++ 后端
-    #     print("Warning: Python backend not fully implemented. Using MiniSat C++ backend is recommended.")
-    #     self.solve_result = self.UNKNOWN
-    #     self.var_values.clear()
-    #     self.failed_assumptions.clear()
-    #     return self.solve_result
+        if self.backend == "cmsat":
+            conflict_ptr = self.lib.cmsat_get_conflict(self.solver, ctypes.byref(out_size))
+            if out_size.value > 0:
+                for i in range(out_size.value):
+                    lit = conflict_ptr[i]
+                    self.failed_assumptions.add(-lit)
+        else:
+            failed_ptr = self.lib.minisat_get_failed_assumptions(self.solver, ctypes.byref(out_size))
+            if out_size.value > 0:
+                self.failed_assumptions = {failed_ptr[i] for i in range(out_size.value)}
     
     def val(self, lit: int) -> int:
         """
@@ -296,10 +383,10 @@ class SATSolver:
     
     def max_var(self) -> int:
         """返回最大变量索引"""
-        if self.backend == "minisat":
-            return self.lib.minisat_max_var(self.solver)
+        if self.backend == "cmsat":
+            return self.lib.cmsat_max_var(self.solver)
         else:
-            return self.max_variable
+            return self.lib.minisat_max_var(self.solver)
     
     def act(self) -> None:
         """清除假设和临时状态"""
@@ -308,12 +395,8 @@ class SATSolver:
         self.solve_result = self.UNKNOWN
         self.var_values.clear()
         self.failed_assumptions.clear()
-        
-        if self.backend == "minisat":
-            self.lib.minisat_clear_assumptions(self.solver)
            
     def clear_act(self) -> None:
-
         # 条件性添加约束（与 C++ 版本行为一致）
         if self.clear_flag:
             max_var = self.max_var()
@@ -333,89 +416,92 @@ class SATSolver:
                 return False
         return self.add(0)  # 结束子句
     
-    # 可选的高级功能
+    def add_xor_gate(self, out: int, in1: int, in2: int) -> bool:
+        """添加 XOR 门: out = in1 XOR in2
+        MiniSat 后端: 展开为4个CNF子句 (无原生XOR支持)
+        CryptoMiniSat: 使用原生 XOR 约束
+        """
+        self.clauses.append([-out, in1, in2])
+        self.clauses.append([-out, -in1, -in2])
+        self.clauses.append([out, -in1, in2])
+        self.clauses.append([out, in1, -in2])
+        if self.backend == "cmsat":
+            return self.lib.cmsat_add_xor_gate(self.solver, out, in1, in2)
+        else:
+            # MiniSat: 添加4个CNF子句
+            for c in [[-out, in1, in2], [-out, -in1, -in2],
+                       [out, -in1, in2], [out, in1, -in2]]:
+                arr = (ctypes.c_int * len(c))(*c)
+                self.lib.minisat_add_clause(self.solver, arr, len(c))
+            return True
+
+    def add_xor(self, lits) -> bool:
+        """添加 XOR 约束: XOR(lits) = 0
+        MiniSat 后端: 展开为CNF子句
+        CryptoMiniSat: 使用原生 XOR 约束
+        """
+        n = len(lits)
+        if n >= 2:
+            if n == 3:
+                self.clauses.append([-lits[0], lits[1], lits[2]])
+                self.clauses.append([-lits[0], -lits[1], -lits[2]])
+                self.clauses.append([lits[0], -lits[1], lits[2]])
+                self.clauses.append([lits[0], lits[1], -lits[2]])
+            elif n == 2:
+                self.clauses.append([lits[0], lits[1]])
+                self.clauses.append([-lits[0], -lits[1]])
+        
+        if self.backend == "cmsat":
+            arr = (ctypes.c_int * n)(*lits)
+            return self.lib.cmsat_add_xor_clause_lits(self.solver, arr, n, False)
+        else:
+            # MiniSat: 添加CNF子句
+            if n == 3:
+                for c in [[-lits[0], lits[1], lits[2]], [-lits[0], -lits[1], -lits[2]],
+                           [lits[0], -lits[1], lits[2]], [lits[0], lits[1], -lits[2]]]:
+                    arr = (ctypes.c_int * len(c))(*c)
+                    self.lib.minisat_add_clause(self.solver, arr, len(c))
+            elif n == 2:
+                for c in [[lits[0], lits[1]], [-lits[0], -lits[1]]]:
+                    arr = (ctypes.c_int * len(c))(*c)
+                    self.lib.minisat_add_clause(self.solver, arr, len(c))
+            return True
+    
     def freeze_var(self, var: int) -> None:
-        """冻结变量（仅 MiniSat 后端支持）"""
+        """冻结变量 (MiniSat支持, CMS忽略)"""
         if self.backend == "minisat" and hasattr(self.lib, 'minisat_freeze_var'):
             self.lib.minisat_freeze_var(self.solver, var - 1)
     
     def unfreeze_var(self, var: int) -> None:
-        """解冻变量（仅 MiniSat 后端支持）"""
+        """解冻变量 (MiniSat支持, CMS忽略)"""
         if self.backend == "minisat" and hasattr(self.lib, 'minisat_unfreeze_var'):
             self.lib.minisat_unfreeze_var(self.solver, var - 1)
     
-    
     def get_raw_cnf(self) -> List[int]:
         """
-        获取原始 CNF 子句（不执行简化）
-        返回格式与 simplify() 相同，但不执行实际的简化操作
+        获取原始 CNF 子句（MiniSat后端从C++获取, CMS从Python侧获取）
         """
-        if self.backend != "minisat":
-            return []
-        
-        out_size = ctypes.c_int()
-        raw_cnf_ptr = self.lib.minisat_get_raw_cnf(self.solver, ctypes.byref(out_size))
-        
-        raw_cnf = []
-        if out_size.value > 0:
-            raw_cnf = [raw_cnf_ptr[i] for i in range(out_size.value)]
-            
-            # 释放 C++ 端分配的内存
-            self.lib.minisat_free_simplified_cnf(raw_cnf_ptr)
-        
-        return raw_cnf
-    
-    def show_raw_cnf(self) -> None:
-        """以可读格式显示原始 CNF"""
-        raw_cnf = self.get_raw_cnf()
-        if not raw_cnf:
-            print("No raw CNF available.")
-            return
-        
-        print("Raw CNF (without simplification):")
-        clause = []
-        clause_num = 1
-        for lit in raw_cnf:
-            if lit == 0:
-                if clause:
-                    # 跳过变量数量信息行 (nVars, -nVars, 0)
-                    if len(clause) == 3 and clause[0] > 0 and clause[1] == -clause[0] and clause[2] == 0:
-                        print(f"  Variables: {clause[0]}")
-                    else:
-                        print(f"  Clause {clause_num}: {' '.join(str(l) for l in clause)}")
-                        clause_num += 1
-                    clause = []
-            else:
-                clause.append(lit)
-        
-        # 打印最后一个子句（如果有）
-        if clause:
-            print(f"  Clause {clause_num}: {' '.join(str(l) for l in clause)}")
+        if self.backend == "minisat":
+            out_size = ctypes.c_int()
+            raw_cnf_ptr = self.lib.minisat_get_raw_cnf(self.solver, ctypes.byref(out_size))
+            raw_cnf = []
+            if out_size.value > 0:
+                raw_cnf = [raw_cnf_ptr[i] for i in range(out_size.value)]
+                self.lib.minisat_free_simplified_cnf(raw_cnf_ptr)
+            return raw_cnf
+        else:
+            raw = []
+            for clause in self.clauses:
+                for lit in clause:
+                    raw.append(lit)
+                raw.append(0)
+            return raw
     
     def get_clauses(self) -> List[List[int]]:
         """
-        获取原始 CNF 子句列表
-        返回: 子句列表，每个子句是一个文字列表
+        获取存储在 Python 侧的子句列表
         """
-        raw_cnf = self.get_raw_cnf()
-        clauses = []
-        current_clause = []
-        
-        for lit in raw_cnf:
-            if lit == 0:
-                if current_clause:
-                    # 跳过变量数量信息行 (nVars, -nVars, 0)
-                    if len(current_clause) != 3 or not (current_clause[0] > 0 and current_clause[1] == -current_clause[0] and current_clause[2] == 0):
-                        clauses.append(current_clause.copy())
-                    current_clause.clear()
-            else:
-                current_clause.append(lit)
-        
-        # 添加最后一个子句（如果有）
-        if current_clause:
-            clauses.append(current_clause)
-        
-        return clauses
+        return [clause.copy() for clause in self.clauses]
     
     def show_info(self, show_cnf: bool = False) -> None:
         """显示求解器信息"""
@@ -426,31 +512,12 @@ class SATSolver:
         print(f"  Solve result: {status_map[self.solve_result]}")
         for i, assume in enumerate(self.pre_assumptions):
             print(f"assume[{i+1}]:",assume)
-        # for i, clause in enumerate(self.clauses):
-        #     print(f"clause {i}:", clause)
-        raw_clauses = self.get_clauses()
-        # with open("raw_clauses.txt", "w") as f:
-        #     for i, clause in enumerate(raw_clauses):
-        #         f.write(f"clause {i}: {' '.join(map(str, clause))}\n")
-                
-        # with open("clauses.txt", "w") as f:
-        #     for i, clause in enumerate(self.clauses):
-        #         f.write(f"clause {i}: {' '.join(map(str, clause))}\n")        
-        # for i, clause in enumerate(raw_clauses):
-        #     print(f"clause {i}:", clause)
-            
         for i, clause in enumerate(self.clauses):
             print(f"clause {i}:", clause)
-        
-        if show_cnf:
-            raw_clauses = self.get_clauses()
-            for i, clause in enumerate(raw_clauses):
-                print(f"raw clause {i}:", clause)
         if self.solve_result == self.SAT:
             print(f"  Model size: {len(self.var_values)}")
         elif self.solve_result == self.UNSAT:
             print(f"  Failed assumptions: ", self.failed_assumptions)
-        # print(self.var_values)
         self.pre_assumptions.clear()
 
 

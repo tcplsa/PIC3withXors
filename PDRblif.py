@@ -137,7 +137,7 @@ def encode_lift(s):
     satelite_unsat = False
     if satelite2 == None:
         satelite2 = SATSolver()
-        satelite2.var_enlarge_to(len(variables)-1)
+        satelite2.var_enlarge_to(primed_first_dimacs * 2)
         for i in blif.inputs:
             satelite2.freeze_var(i)
             satelite2.freeze_var(prime_var(i))
@@ -175,11 +175,13 @@ def encode_lift(s):
             satelite2.add(pl)
             satelite2.add(0)
         #print(lit_set)
-        gates = ands + xors + ors
-        gates.sort(key=lambda x: x[0])  # 按输出变量升序排序
-        # print("gates: ", gates)
+        gates = [(o,i1,i2,0) for (o,i1,i2) in ands] + \
+                [(o,i1,i2,1) for (o,i1,i2) in xors] + \
+                [(o,i1,i2,2) for (o,i1,i2) in ors]
+        gates.sort(key=lambda x: x[0])
         for g in reversed(gates):
-            if g in ands:
+            g_type = g[3]
+            if g_type == 0:
                 assert g[0] > 0, f"And门输出g[0]必须为正数，实际为{g[0]}"
                 if g[0] in lit_set:
                     lit_set.add(abs(g[1]))
@@ -216,29 +218,13 @@ def encode_lift(s):
                         satelite2.add(-pi2)
                         satelite2.add(0) 
         
-            if g in xors:
+            elif g_type == 1:
                 assert g[0] > 0, f"Xor门输出g[0]必须为正数，实际为{g[0]}"
                 if g[0] in lit_set:
                     lit_set.add(abs(g[1]))
                     lit_set.add(abs(g[2]))
-                    # print("g[0]: ",g[0]," g[1]: ",g[1]," g[2]: ",g[2])
-                    satelite2.add(-g[0])
-                    satelite2.add(g[1])
-                    satelite2.add(g[2])
-                    satelite2.add(0)  
-                    satelite2.add(-g[0])
-                    satelite2.add(-g[1])
-                    satelite2.add(-g[2])
-                    satelite2.add(0) 
-                    satelite2.add(g[0])
-                    satelite2.add(-g[1])
-                    satelite2.add(g[2])
-                    satelite2.add(0)  
-                    
-                    satelite2.add(g[0])
-                    satelite2.add(g[1])
-                    satelite2.add(-g[2])
-                    satelite2.add(0) 
+                    # 原生 XOR: out ⊕ in1 ⊕ in2 = 0  ↔  out = in1 XOR in2
+                    satelite2.add_xor([g[0], g[1], g[2]])
                     
                     if g[0] in prime_lit_set:
                         po = prime_lit(g[0])
@@ -247,28 +233,10 @@ def encode_lift(s):
                         
                         prime_lit_set.add(abs(g[1]))
                         prime_lit_set.add(abs(g[2]))
-                        # print("po: ",po," pi1: ",pi1," pi2: ",pi2)
-                        satelite2.add(-po)
-                        satelite2.add(pi1)
-                        satelite2.add(pi2)
-                        satelite2.add(0)  
-                        
-                        satelite2.add(-po)
-                        satelite2.add(-pi1)
-                        satelite2.add(-pi2)
-                        satelite2.add(0) 
-                        
-                        satelite2.add(po)
-                        satelite2.add(pi1)
-                        satelite2.add(-pi2)
-                        satelite2.add(0)
-                        
-                        satelite2.add(po)
-                        satelite2.add(-pi1)
-                        satelite2.add(pi2)
-                        satelite2.add(0)
+                        # primed 版本: out' ⊕ in1' ⊕ in2' = 0
+                        satelite2.add_xor([po, pi1, pi2])
         
-            if g in ors:
+            elif g_type == 2:
                 assert g[0] > 0, f"Or门输出g[0]必须为正数，实际为{g[0]}"
                 if g[0] in lit_set:
                     lit_set.add(abs(g[1]))
@@ -515,10 +483,13 @@ def encode_init_condition(s):
         for l in blif.constraints:
             lit_set.add(abs(l))
 
-        gates = ands + xors + ors
+        gates = [(o,i1,i2,0) for (o,i1,i2) in ands] + \
+                [(o,i1,i2,1) for (o,i1,i2) in xors] + \
+                [(o,i1,i2,2) for (o,i1,i2) in ors]
         gates.sort(key=lambda x: x[0])
         for g in reversed(gates):
-            if g in ands:
+            g_type = g[3]
+            if g_type == 0:
                 assert g[0] > 0, f"And门输出g[0]必须为正数，实际为{g[0]}"
                 if g[0] in lit_set:
                     lit_set.add(abs(g[1]))
@@ -533,29 +504,13 @@ def encode_init_condition(s):
                     s.add(-g[1])
                     s.add(-g[2])
                     s.add(0)
-            if g in xors:
+            elif g_type == 1:
                 assert g[0] > 0, f"Xor门输出g[0]必须为正数，实际为{g[0]}"
                 if g[0] in lit_set:
                     lit_set.add(abs(g[1]))
                     lit_set.add(abs(g[2]))
-                    s.add(-g[0])
-                    s.add(g[1])
-                    s.add(g[2])
-                    s.add(0)  
-                    s.add(-g[0])
-                    s.add(-g[1])
-                    s.add(-g[2])
-                    s.add(0) 
-                    s.add(g[0])
-                    s.add(-g[1])
-                    s.add(g[2])
-                    s.add(0)  
-                    
-                    s.add(g[0])
-                    s.add(g[1])
-                    s.add(-g[2])
-                    s.add(0)
-            if g in ors:
+                    s.add_xor([g[0], g[1], g[2]])
+            elif g_type == 2:
                 assert g[0] > 0, f"Or门输出g[0]必须为正数，实际为{g[0]}"
                 if g[0] in lit_set:
                     lit_set.add(abs(g[1]))
@@ -635,7 +590,7 @@ def encode_translation(s,satelite,cons = True):
     satelite_unsat = False
     if satelite == None:
         satelite = SATSolver()
-        satelite.var_enlarge_to(len(variables)-1)
+        satelite.var_enlarge_to(primed_first_dimacs * 2)  # 需要覆盖 primed 变量空间
         for i in blif.inputs: 
             satelite.freeze_var(abs(i))
             satelite.freeze_var(prime_var(abs(i)))
@@ -656,10 +611,10 @@ def encode_translation(s,satelite,cons = True):
         lit_set = prime_lit_set.copy()
         for l in nexts:
             lit_set.add(abs(l))
-        print(lit_set)
+        # print(lit_set)
         satelite.add(-1)
         satelite.add(0)
-        print(-bad)
+        # print(-bad)
         satelite.add(-bad)
         satelite.add(0)
         if cons == True:
@@ -683,17 +638,17 @@ def encode_translation(s,satelite,cons = True):
             satelite.add(pl)
             satelite.add(0)
         # print(lit_set)
-        gates = ands + xors + ors
+        gates = [(o,i1,i2,0) for (o,i1,i2) in ands] + \
+                [(o,i1,i2,1) for (o,i1,i2) in xors] + \
+                [(o,i1,i2,2) for (o,i1,i2) in ors]
         gates.sort(key=lambda x: x[0])  # 按输出变量升序排序
-        # print("gates: ", gates)
         for g in reversed(gates):
-            # print(g)
-            if g in ands:
+            g_type = g[3]
+            if g_type == 0:
                 assert g[0] > 0, f"And门输出g[0]必须为正数，实际为{g[0]}"
                 if g[0] in lit_set:
                     lit_set.add(abs(g[1]))
                     lit_set.add(abs(g[2]))
-                    # print("g[0]: ",g[0]," g[1]: ",g[1]," g[2]: ",g[2])
                     satelite.add(-g[0])
                     satelite.add(g[1])
                     satelite.add(0)  
@@ -723,29 +678,13 @@ def encode_translation(s,satelite,cons = True):
                         satelite.add(-pi2)
                         satelite.add(0) 
         
-            if g in xors:
+            elif g_type == 1:
                 assert g[0] > 0, f"Xor门输出g[0]必须为正数，实际为{g[0]}"
                 if g[0] in lit_set:
                     lit_set.add(abs(g[1]))
                     lit_set.add(abs(g[2]))
-                    # print("g[0]: ",g[0]," g[1]: ",g[1]," g[2]: ",g[2])
-                    satelite.add(-g[0])
-                    satelite.add(g[1])
-                    satelite.add(g[2])
-                    satelite.add(0)  
-                    satelite.add(-g[0])
-                    satelite.add(-g[1])
-                    satelite.add(-g[2])
-                    satelite.add(0) 
-                    satelite.add(g[0])
-                    satelite.add(-g[1])
-                    satelite.add(g[2])
-                    satelite.add(0)  
-                    
-                    satelite.add(g[0])
-                    satelite.add(g[1])
-                    satelite.add(-g[2])
-                    satelite.add(0) 
+                    # 原生 XOR: out ⊕ in1 ⊕ in2 = 0
+                    satelite.add_xor([g[0], g[1], g[2]])
                     
                     if g[0] in prime_lit_set:
                         po = prime_lit(g[0])
@@ -753,32 +692,19 @@ def encode_translation(s,satelite,cons = True):
                         pi2 = prime_lit(g[2])
                         prime_lit_set.add(abs(g[1]))
                         prime_lit_set.add(abs(g[2]))
-                        # print("po: ",po," pi1: ",pi1," pi2: ",pi2)
-                        satelite.add(-po)
-                        satelite.add(pi1)
-                        satelite.add(pi2)
-                        satelite.add(0)  
-                        
-                        satelite.add(-po)
-                        satelite.add(-pi1)
-                        satelite.add(-pi2)
-                        satelite.add(0) 
-                        
-                        satelite.add(po)
-                        satelite.add(pi1)
-                        satelite.add(-pi2)
+                        # primed 版本: out' ⊕ in1' ⊕ in2' = 0
+                        satelite.add_xor([po, pi1, pi2])
                         satelite.add(0)
                         
                         satelite.add(po)
                         satelite.add(-pi1)
                         satelite.add(pi2)
                         satelite.add(0)
-            if g in ors:
+            elif g_type == 2:
                 assert g[0] > 0, f"Or门输出g[0]必须为正数，实际为{g[0]}"
                 if g[0] in lit_set:
                     lit_set.add(abs(g[1]))
                     lit_set.add(abs(g[2]))
-                    # print("g[0]: ",g[0]," g[1]: ",g[1]," g[2]: ",g[2])
                     satelite.add(-g[0])
                     satelite.add(g[1])
                     satelite.add(g[2])
@@ -798,7 +724,6 @@ def encode_translation(s,satelite,cons = True):
                         pi2 = prime_lit(g[2])
                         prime_lit_set.add(abs(g[1]))
                         prime_lit_set.add(abs(g[2]))
-                        # print("po: ",po," pi1: ",pi1," pi2: ",pi2)
                         satelite.add(-po)
                         satelite.add(pi1)
                         satelite.add(pi2)
@@ -1314,6 +1239,7 @@ def aiger_to_dimacs(lit):
 def new_frame():     #创建新的帧
     last = len(frames)
     frame =  Frame()
+    frame.solver.var_enlarge_to(primed_first_dimacs * 2)  # 预分配 primed 变量空间
     frames.append(frame)
     global satelite1
     satelite1 = encode_translation(frames[last].solver,satelite1)
@@ -1399,9 +1325,27 @@ def translate_to_dimacs():
         pl = prime_lit(constraints[i])
         constraints_prime.append(pl)
 
-    # bad信号（假设blif.outputs[0]为bad）
+    # bad信号（blif.outputs[0]为bad，extractxor产生的BLIF可能无outputs需手动指定）
     bad = blif.outputs[0] if blif.outputs else None
+    if bad is None:
+        raise ValueError(
+            "BLIF 缺少 .outputs 声明，无法确定 bad/property 信号。\n"
+            "如果你的 BLIF 由 extractxor.py 生成，请检查原始 AIG/AAG 是否包含 bad 输出。\n"
+            f"当前 BLIF 的 outputs 列表: {blif.outputs}"
+        )
     bad_prime = prime_lit(bad) if bad is not None else None
+    
+    # 扩展 variables 列表以覆盖所有 PDR 变量编号（填补 gaps）
+    # PDR 编号可能不连续（如 neg_pairs 导致正变量缺失），需要确保 variables[abs(lit)] 正确
+    max_pdr = 0
+    for v in variables:
+        max_pdr = max(max_pdr, v.number if hasattr(v, 'number') else 0)
+    if ands: max_pdr = max(max_pdr, max(abs(x) for g in ands for x in g))
+    if xors: max_pdr = max(max_pdr, max(abs(x) for g in xors for x in g))
+    if ors:  max_pdr = max(max_pdr, max(abs(x) for g in ors for x in g))
+    if latches: max_pdr = max(max_pdr, max(abs(x) for x in latches))
+    while len(variables) <= max_pdr:
+        variables.append(Variable(len(variables), f"gap_{len(variables)}"))
     # for var in variables:
     #     print(var.name)
 
