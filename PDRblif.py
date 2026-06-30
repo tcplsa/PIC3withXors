@@ -49,8 +49,8 @@ output_stats_for_ctg = False
 
 log = Log()
 
-show_propagate_info = True
-show_block_info = True
+show_propagate_info = False
+show_block_info = False
 show_pre_of_bad = False
 
 # show_propagate_info = False
@@ -694,12 +694,7 @@ def encode_translation(s,satelite,cons = True):
                         prime_lit_set.add(abs(g[2]))
                         # primed 版本: out' ⊕ in1' ⊕ in2' = 0
                         satelite.add_xor([po, pi1, pi2])
-                        satelite.add(0)
-                        
-                        satelite.add(po)
-                        satelite.add(-pi1)
-                        satelite.add(pi2)
-                        satelite.add(0)
+
             elif g_type == 2:
                 assert g[0] > 0, f"Or门输出g[0]必须为正数，实际为{g[0]}"
                 if g[0] in lit_set:

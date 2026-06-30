@@ -241,7 +241,7 @@ def main(args):
     
     if filepath is None:
         # filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/bc57sensorsp0.blif"
-        filepath = "/home/lyj238/wdl/data/hardproblems-blif-xor/design_aiger_0508.blif"
+        filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/oski15a14b01s.blif"
     
     # 通过环境变量传递后端选择给 Class.py
     os.environ["BLIF_SOLVER_BACKEND"] = solver_backend

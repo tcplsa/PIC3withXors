@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+
+# NFS temp files
+.nfs*
+
+# CryptoMiniSat build artifacts (keep only final .so and headers)
+cryptominisat/build/_deps/
+cryptominisat/build/CMakeFiles/
+cryptominisat/build/cmake_install.cmake
+cryptominisat/build/CMakeCache.txt
+cryptominisat/build/Makefile
+cryptominisat/build/compile_commands.json
+cryptominisat/build/cmsat5-src/
+cryptominisat/build/oracle/
+cryptominisat/build/cryptominisat5/
+cryptominisat/build/*.cmake
+cryptominisat/build/**/*.o
+cryptominisat/build/**/*.a
+
+# CMS build config (not portable)
+cryptominisat/build/cryptominisat5Config.cmake
+cryptominisat/build/cryptominisat5Targets.cmake
+cryptominisat/build/cmake_uninstall.cmake
+
+# Logs
+run_logs/
+
+# MiniSat submodule (already tracked)
+minisat/
