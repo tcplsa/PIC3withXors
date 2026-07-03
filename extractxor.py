@@ -342,9 +342,13 @@ def write_blif(nodes, inputs, outputs, latches, M, and_node_ids, out_filename,
             cur_name = get_name(cur_id)
             nxt_id, nxt_inv = lit_to_signal(nxt_lit)
             if nxt_id == 0:
-                # 常量信号：0→_const0，1→_const1，无需额外 NOT 门
-                nxt_name = "_const1" if nxt_inv else "_const0"
-                f.write(f".latch {nxt_name} {cur_name} 0\n")
+                # 常量信号：0→_const0(init=0)，1→_const1(init=1)
+                if nxt_inv:
+                    nxt_name = "_const1"
+                    f.write(f".latch {nxt_name} {cur_name} 1\n")
+                else:
+                    nxt_name = "_const0"
+                    f.write(f".latch {nxt_name} {cur_name} 0\n")
             else:
                 nxt_name = get_name(nxt_id)
                 if nxt_inv:

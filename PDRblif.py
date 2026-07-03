@@ -18,6 +18,9 @@ init_state = []
 nexts = []
 num_inputs = 0
 num_latches = 0
+_worker_silent = False  # portfolio worker 模式下抑制打印
+_witness_mode = False   # 仅 --witness 时打印 CEX/INVARIANT
+
 num_constraints = 0
 num_ands = 0
 num_xors = 0   
@@ -48,6 +51,13 @@ option_max_joins = 1<<20
 output_stats_for_ctg = False
 
 log = Log()
+
+# 导出归纳不变式 / 反例路径 (仅 lemma 子句，不含转移关系 T)
+converged_frame_idx = -1          # SAFE 时收敛的帧号
+export_lemma_clauses = []         # 纯 lemma 子句（从 add_cube 中提取）
+export_cex_chain = []             # UNSAFE 时的反例状态链
+lemma_clauses_per_frame = []      # 每个帧的 lemma 子句列表 (帧索引 -> [clause, ...])
+export_design_info = {}           # 设计信息（验证脚本用它独立编码 Init/T）
 
 show_propagate_info = False
 show_block_info = False
@@ -293,7 +303,7 @@ def encode_lift(s):
     return satelite2
 
 def extract_state_from_sat(sat, s, succ, index):
-    print("extract_state_from_sat")
+    # print("extract_state_from_sat")  # debug
     log.extrct_cnt += 1
     start_time = time.perf_counter()
     global lift
@@ -301,14 +311,8 @@ def extract_state_from_sat(sat, s, succ, index):
     if lift == None:
         lift = SATSolver()
         encode_lift(lift)
-    print("constraints: ", constraints)
-    print("constraints_prime: ", constraints_prime)
-    for l in constraints:
-        lift.add(l)
-        lift.add(0)
-    for l in constraints_prime:
-        lift.add(l)
-        lift.add(0)
+    
+    # print("lift add")
     # print("clear_flag",lift.clear_flag)
     lift.clear_act()
     # print("lift")
@@ -337,19 +341,25 @@ def extract_state_from_sat(sat, s, succ, index):
             assumptions.append(l)
     
     act_var = lift.max_var() + 1
-    print("act_var", act_var)
+    # print("act_var", act_var)  # debug
     
     lift.add(-act_var)
 
-
-            
+    # print("constraints: ", constraints)  # debug
+    # print("constraints_prime: ", constraints_prime)  # debug
+    for l in constraints:
+        lift.add(-l)
+    for l in constraints_prime:
+        lift.add(-l)
     if succ == None:
         lift.add(-bad_prime)
     else:
         for l in succ.latches: 
             lift.add(prime_lit(-l))
     lift.add(0)
-    # print("lift add")
+
+            
+
     
     
     assumptions.sort(key=cmp_to_key(lit_cmp))
@@ -422,7 +432,7 @@ def get_pre_of_bad(s):
         # print("c: ",frames[Fk].solver.val(c))
         pass
     # res = 0
-    print("res:",res)
+    # print("res:",res)  # debug, 并行时会刷屏
     SAT = 1
     if res == SAT:  
         # sys.exit()
@@ -954,6 +964,7 @@ def CTG_down(cube, k, rec_depth, required):
 
 def add_cube(cube, k ,to_all, ispropagate, prtimes):
     global earliest_strengthened_frame
+    global lemma_clauses_per_frame
     if ispropagate == False:
         earliest_strengthened_frame =min(earliest_strengthened_frame,k)
     cube.sort(key = lambda x:(abs(x),x))
@@ -961,15 +972,21 @@ def add_cube(cube, k ,to_all, ispropagate, prtimes):
     if cube_tuple in frames[k].cubes:
         return
     frames[k].cubes.add(cube_tuple)
-    # print("Added cube(sz",len(cube),") to frame", k, ":")
-    # for c in cube:
-    #     print("-" if c < 0 else "", variables[abs(c)].name, end=' ')
-    # print()
+
+    # ★ 记录 lemma 子句：cube 的否定，即对每个 literal 取反后析取
+    lemma_clause = [-l for l in cube]
+    while len(lemma_clauses_per_frame) <= k:
+        lemma_clauses_per_frame.append([])
+    lemma_clauses_per_frame[k].append(lemma_clause)
+
     if to_all == True:
         for i in range(1, k):
             for l in cube:
                 frames[i].solver.add((-l))
             frames[i].solver.add(0)
+            while len(lemma_clauses_per_frame) <= i:
+                lemma_clauses_per_frame.append([])
+            lemma_clauses_per_frame[i].append(lemma_clause)
     for l in cube:
         frames[k].solver.add((-l))
     frames[k].solver.add(0)
@@ -1089,6 +1106,38 @@ def rec_block_cube():
                 s.next = obl.state
                 cex_state_idx = s
                 find_cex = True
+
+                # ★ 导出反例路径：从 s 沿 .next 链走到 bad state
+                global export_cex_chain, export_design_info
+                export_cex_chain = []
+                cur = s
+                while cur is not None:
+                    state_info = {
+                        'inputs': list(cur.inputs),
+                        'latches': list(cur.latches),
+                    }
+                    export_cex_chain.append(state_info)
+                    cur = cur.next
+                if _witness_mode and not _worker_silent:
+                    print(f"\n[CEX] 反例路径长度: {len(export_cex_chain)} 步")
+                    for idx, st in enumerate(export_cex_chain):
+                        print(f"[CEX]   状态 {idx}: inputs={st['inputs']}, latches={st['latches']}")
+
+                # 同时导出设计信息（供验证脚本独立编码 Init/T）
+                export_design_info = {
+                    'num_inputs': num_inputs,
+                    'num_latches': num_latches,
+                    'inputs': list(inputs),
+                    'latches': [(int(l[0]), int(l[1]), int(l[2])) for l in blif.latches],
+                    'ands': [list(a) for a in ands],
+                    'xors': [list(x) for x in xors],
+                    'ors': [list(o) for o in ors],
+                    'constraints': list(constraints),
+                    'bad': int(bad),
+                    'init_state': list(init_state),
+                    'nexts': list(nexts),
+                }
+
                 # print("end rec_block_cube")
                 end_time = time.perf_counter()
                 log.block_timer += (end_time - start_time)
@@ -1113,6 +1162,7 @@ def propagate():
     start_time = time.perf_counter()
     global bad
     global show_propagate_info
+    global num_ands, num_xors, num_ors
     start_k = 1
     if top_frame_cannot_reach_bad == True:
         start_k = depth()
@@ -1214,6 +1264,44 @@ def propagate():
                     
                     # 最终处理 
                     bad = -invariant
+
+            # ★ 导出归纳不变式（纯 lemma 子句，不含转移关系 T）
+            # 验证脚本会独立编码 Init 和 T，然后验证这些 lemma 子句
+            global converged_frame_idx, export_lemma_clauses, export_design_info
+            converged_frame_idx = i + 1
+            if _witness_mode and not _worker_silent:
+                print(f"\n[INVARIANT] 帧 {i} 收敛，归纳不变式位于帧 {converged_frame_idx}")
+
+            # 收集收敛帧的所有 lemma 子句（从所有 ≤ converged_frame_idx 的帧汇总并去重）
+            export_lemma_clauses = []
+            seen = set()
+            for f_idx in range(1, converged_frame_idx + 1):
+                if f_idx < len(lemma_clauses_per_frame):
+                    for cl in lemma_clauses_per_frame[f_idx]:
+                        key = tuple(sorted(cl))
+                        if key not in seen:
+                            seen.add(key)
+                            export_lemma_clauses.append(cl)
+            if _witness_mode and not _worker_silent:
+                print(f"[INVARIANT] 导出 {len(export_lemma_clauses)} 个纯 lemma 子句")
+
+            # 导出设计信息（验证脚本用它独立编码 Init 和 T）
+            export_design_info = {
+                'num_inputs': num_inputs,
+                'num_latches': num_latches,
+                'inputs': list(inputs),
+                'latches': [(int(l[0]), int(l[1]), int(l[2])) for l in blif.latches],
+                'ands': [list(a) for a in ands],
+                'xors': [list(x) for x in xors],
+                'ors': [list(o) for o in ors],
+                'constraints': list(constraints),
+                'bad': int(bad),
+                'init_state': list(init_state),
+                'nexts': list(nexts),
+            }
+            if _witness_mode and not _worker_silent:
+                print(f"[INVARIANT] 设计信息: inputs={num_inputs}, latches={num_latches}, "
+                      f"ands={num_ands}, xors={num_xors}, ors={num_ors}")
             end_time = time.perf_counter()
             log.propagate_timer += (end_time - start_time)
             return True
@@ -1356,6 +1444,14 @@ def pdr_main(blif_data):
     global top_frame_cannot_reach_bad
     global unknown
     global blif
+    global converged_frame_idx, export_lemma_clauses, export_cex_chain
+    global lemma_clauses_per_frame, export_design_info
+    # 重置导出状态
+    converged_frame_idx = -1
+    export_lemma_clauses = []
+    export_cex_chain = []
+    lemma_clauses_per_frame = []
+    export_design_info = {}
     blif = blif_data
     # print(blif.inputs)
     # print(blif.outputs)
@@ -1418,6 +1514,49 @@ def pdr_main(blif_data):
             earliest_strengthened_frame = depth()
     if unknown == True:
         result = 0
-    log.print_statistics()
-    return result,log
+
+    # ★ 静默验证（结果写入 extra，进度仅 stderr）
+    independent_verify_result = None
+    if result == 20 and converged_frame_idx > 0 and export_lemma_clauses:
+        independent_verify_result = _independent_verify(export_lemma_clauses, bad)
+
+    extra = {
+        'converged_frame': converged_frame_idx,
+        'invariant_clauses': export_lemma_clauses,
+        'cex_chain': export_cex_chain,
+        'design_info': export_design_info,
+        'independent_verify': independent_verify_result,
+    }
+    return result, log, extra
+
+
+def _independent_verify(lemma_clauses, bad_signal):
+    """创建全新求解器，用 PDR 自身的 encode_translation 重新编码 T。
+    静默执行，结果写入 extra 供 witness JSON 使用。"""
+    vs = SATSolver()
+    encode_translation(vs, None)
+    for lit in constraints_prime: vs.add(lit); vs.add(0)
+    for cl in lemma_clauses:
+        for lit in cl: vs.add(lit)
+        vs.add(0)
+    n = len(lemma_clauses)
+    failed = 0
+    for idx, cl in enumerate(lemma_clauses):
+        for lit in cl: vs.assume(prime_lit(-lit))
+        if vs.solve(False) != 0:
+            failed += 1
+            if failed <= 5 and not _worker_silent:
+                print(f"  [验证] primed lemma {idx} 不通过: {cl}", file=sys.stderr)
+        if idx % 50 == 0 and idx > 0 and not _worker_silent:
+            print(f"  [验证] {idx}/{n}...", file=sys.stderr)
+    c2_ok = (failed == 0)
+    vs.assume(bad_signal)
+    c3_ok = (vs.solve(False) == 0)
+    return {
+        'lemma_total': n,
+        'lemma_passed': n - failed,
+        'lemma_failed': failed,
+        'inductive_ok': c2_ok,
+        'bad_ok': c3_ok,
+    }
 

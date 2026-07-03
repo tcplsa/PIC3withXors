@@ -103,7 +103,8 @@ def parse_blif_core(path):
             if len(parts) >= 3:
                 input_sig = parts[1]
                 output_sig = parts[2]
-                init_val = 1 if (len(parts) >= 5 and parts[4] == '1') else 0
+                # init 是最后一个 token（兼容 4-token 和 6-token 格式）
+                init_val = 1 if (len(parts) >= 4 and parts[-1] == '1') else 0
                 used_signals.add(input_sig)
                 used_signals.add(output_sig)
                 latches.append({'type':'latch', 'input':input_sig, 'output':output_sig, 'init':init_val})

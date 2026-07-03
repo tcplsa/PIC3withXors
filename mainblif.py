@@ -1,6 +1,7 @@
 import sys
 import os
 import shutil
+import json
 # from Aiger import *
 from PDRblif import *
 # 默认使用C++快速解析器（与Python版完全一致）
@@ -209,12 +210,14 @@ def _pdr_blif_worker(blif, seed, solver_backend, result_queue):
     """Portfolio worker: 用指定 seed 跑 PDR，结果放入 queue"""
     import random
     import os
+    import PDRblif
     random.seed(seed)
     os.environ["BLIF_SOLVER_BACKEND"] = solver_backend
+    PDRblif._worker_silent = True  # 抑制 worker 内部的打印
     start = time.perf_counter()
-    result, log = pdr_main(blif)
+    result, log, extra = pdr_main(blif)
     elapsed = time.perf_counter() - start
-    result_queue.put((result, log, elapsed, seed))
+    result_queue.put((result, log, elapsed, seed, extra))
 
 
 def main(args):
@@ -223,6 +226,7 @@ def main(args):
     filepath = None
     parallel = 10
     base_seed = None
+    witness = False  # 是否导出 witness（归纳不变式/反例路径）
     
     i = 0
     while i < len(args):
@@ -235,13 +239,21 @@ def main(args):
         elif args[i] == "--seed" and i + 1 < len(args):
             base_seed = int(args[i + 1])
             i += 2
+        elif args[i] == "--witness":
+            witness = True
+            i += 1
         else:
             filepath = args[i]
             i += 1
     
     if filepath is None:
-        # filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/bc57sensorsp0.blif"
-        filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/oski15a14b01s.blif"
+        filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/cmugigamax.blif"
+        # filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/oski15a14b01s.blif"
+    
+    if witness:
+        print("Witness 模式: 将导出归纳不变式 / 反例路径")
+        import PDRblif
+        PDRblif._witness_mode = True
     
     # 通过环境变量传递后端选择给 Class.py
     os.environ["BLIF_SOLVER_BACKEND"] = solver_backend
@@ -250,13 +262,6 @@ def main(args):
     filename, ext = get_file_extension(filepath)
     print("filename=", filename)
     print("fileext=", ext)
-    
-    # 1. 复制文件到 Unsolved_files
-    # unsolved_path = copy_to_unsolved(filepath)
-    # if not unsolved_path and ext in ('.aig', '.aag'):
-    #     print("Warning: failed to copy file, continue processing...")
-
-
     
     # 解析 BLIF（portfolio 模式只需解析一次）
     if ext == '.blif':
@@ -289,13 +294,14 @@ def main(args):
             procs.append(p)
             p.start()
 
-        result, log, elapsed, winner_seed = q.get()  # 等第一个完成
+        result, log, elapsed, winner_seed, extra = q.get()  # 等第一个完成
+        total_elapsed = time.perf_counter() - pre_start_time  # 先计时
         for p in procs:
             p.terminate()
         for p in procs:
             p.join()
-        print(f"  Winner: seed={winner_seed}, elapsed={elapsed:.3f}s")
-        total_elapsed = time.perf_counter() - pre_start_time
+        time.sleep(1)        # 等待 worker stdout 排空
+        sys.stdout.flush()
 
     else:
         # ---- 单实例模式 ----
@@ -304,8 +310,11 @@ def main(args):
             import random as _random
             _random.seed(base_seed)
             print(f"单实例模式: seed={base_seed}")
-        result, log = pdr_main(blif)
+        result, log, extra = pdr_main(blif)
         total_elapsed = time.perf_counter() - start_time
+
+    # 输出统计数据（从 worker 移到主进程，保证顺序）
+    log.print_statistics()
 
     # 输出执行结果
     if result == 20:
@@ -317,19 +326,44 @@ def main(args):
 
     print(f"Preprocessing time: {pre_time:.6f} seconds")
     print(f"Elapsed time: {total_elapsed:.6f} seconds")
+
+    # ★ --witness 模式下导出归纳不变式 / 反例到 run_logs/ 文件夹
+    if witness:
+        _export_witness(filepath, result, total_elapsed, pre_time, extra)
+
+
+def _export_witness(filepath, result, total_elapsed, pre_time, extra):
+    """将 witness 数据导出到 run_logs/ 文件夹下的 JSON 文件"""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    log_dir = os.path.join(script_dir, "run_logs")
+    os.makedirs(log_dir, exist_ok=True)
     
-    # 3. 移动文件到 tested_files
-    # dst = None
-    # if ext in ('.aig', '.aag') and unsolved_path:
-    #     dst = move_to_tested(unsolved_path)
+    base = os.path.splitext(os.path.basename(filepath))[0]
+    json_path = os.path.join(log_dir, f"{base}_pdr_witness.json")
     
-    # # 4. 生成日志文件（仅当log有效且dst存在时）
-    # if log is not None and dst is not None:
-    #     write_log_to_file(log, dst, result, total_elapsed)
-    # elif log is None:
-    #     print("Warning: log is None, skip writing log file")
-    # elif dst is None:
-    #     print("Warning: destination path in tested_files not found, skip writing log file")
+    export_data = {
+        'result': 'SAFE' if result == 20 else 'UNSAFE' if result == 10 else 'UnSolved',
+        'result_code': result,
+        'total_elapsed': total_elapsed,
+        'pre_time': pre_time,
+        'file': filepath,
+    }
+    
+    if result == 20:
+        export_data['converged_frame'] = extra.get('converged_frame', -1)
+        export_data['invariant_clauses'] = extra.get('invariant_clauses', [])
+        export_data['design_info'] = extra.get('design_info', {})
+        export_data['independent_verify'] = extra.get('independent_verify')
+        print(f"\n导出归纳不变式: {len(export_data['invariant_clauses'])} 个纯 lemma 子句")
+        print(f"收敛帧号: {export_data['converged_frame']}")
+    elif result == 10:
+        export_data['cex_chain'] = extra.get('cex_chain', [])
+        export_data['design_info'] = extra.get('design_info', {})
+        print(f"\n导出反例路径: {len(export_data['cex_chain'])} 步")
+    
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(export_data, f, indent=2)
+    print(f"Witness 已保存到: {json_path}")
 
 if __name__ == "__main__":
     # 将命令行参数（排除脚本名）传入main函数

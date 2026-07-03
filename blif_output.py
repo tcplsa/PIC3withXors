@@ -392,7 +392,6 @@ def parse_blif_with_layered_vars(blif_path):
         original_sig = sig_name
         # 解析等价映射
         resolved_sig = _resolve_equivalence(sig_name, eq_pairs)
-        # print(f"映射信号: 原始={original_sig} 解析后={resolved_sig}" )
         # force_positive为True时，自动同步所有等价/相反信号编号为正数
         if force_positive:
             # 以当前编号的绝对值为正编号进行同步
@@ -533,6 +532,8 @@ def parse_blif_with_layered_vars(blif_path):
 
     constraints_var = []
     for constr_sig, val in constraints:
+        if constr_sig in ("_const0", "_const1"):
+            continue  # 已通过 sentinel 硬编码到 DIMACS 1/-1，无需约束子句
         sig_var = map_signal_to_var(constr_sig)
         if sig_var is None:
             continue
