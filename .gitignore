@@ -26,5 +26,5 @@ cryptominisat/build/cmake_uninstall.cmake
 # Logs
 run_logs/
 
-# MiniSat submodule (already tracked)
-minisat/
+# MiniSat sources (build artifacts excluded by minisat/.gitignore)
+# minisat/ source is tracked; .gitignore inside excludes build/

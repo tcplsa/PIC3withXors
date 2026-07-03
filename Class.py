@@ -65,12 +65,11 @@ class SATSolver:
 
     def _init_cryptominisat(self):
         """初始化 CryptoMiniSat 后端"""
-        cms_lib_path = os.path.abspath(
-            "/home/lyj238/wdl/blif/cryptominisat/build/lib/libcryptominisat5.so"
-        )
+        _blif_dir = os.path.dirname(os.path.abspath(__file__))
+        cms_lib_path = os.path.join(_blif_dir, "cryptominisat/build/lib/libcryptominisat5.so")
         ctypes.CDLL(cms_lib_path, mode=ctypes.RTLD_GLOBAL)
         
-        lib_path = os.path.abspath("/home/lyj238/wdl/blif/libcmsat_wrapper.so")
+        lib_path = os.path.join(_blif_dir, "libcmsat_wrapper.so")
         self.lib = ctypes.CDLL(lib_path)
         self._setup_cmsat_functions()
         self.solver = self.lib.cmsat_create()
@@ -81,7 +80,8 @@ class SATSolver:
     
     def _init_minisat(self):
         """初始化 MiniSat 后端"""
-        lib_path = os.path.abspath("/home/lyj238/wdl/IC3/libminisat_wrapper.so")
+        _blif_dir = os.path.dirname(os.path.abspath(__file__))
+        lib_path = os.path.join(_blif_dir, "libminisat_wrapper.so")
         self.lib = ctypes.CDLL(lib_path)
         self._setup_minisat_functions()
         self.solver = self.lib.minisat_create()

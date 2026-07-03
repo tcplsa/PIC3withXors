@@ -247,8 +247,8 @@ def main(args):
             i += 1
     
     if filepath is None:
-        filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/cmugigamax.blif"
-        # filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/oski15a14b01s.blif"
+        # filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/cmugigamax.blif"
+        filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/oski15a14b01s.blif"
     
     if witness:
         print("Witness 模式: 将导出归纳不变式 / 反例路径")
