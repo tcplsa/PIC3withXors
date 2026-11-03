@@ -110,6 +110,7 @@ namespace CMSat {
 
         void set_num_threads(unsigned n); //Number of threads to use. Must be set before any vars/clauses are added
         void set_allow_otf_gauss(); //allow on-the-fly gaussian elimination
+        bool set_no_gauss(); //drop matrices and keep native XOR propagation
         /**
          * CPU time (in seconds) that can be consumed before the next call to solve() must return
          *
@@ -202,6 +203,9 @@ namespace CMSat {
         uint64_t get_last_conflicts(); //get total number of conflicts of last solve() or simplify() call of all threads
         uint64_t get_last_propagations();  //get total number of propagations of last solve() or simplify() call made by all threads
         uint64_t get_last_decisions(); //get total number of decisions of last solve() or simplify() call made by all threads
+        void get_gauss_stats(uint64_t& checks, uint64_t& row_xors,
+            uint64_t& propagations, uint64_t& conflicts, uint64_t& matrices,
+            uint64_t& rows, uint64_t& columns) const;
 
 
         ////////////////////////////

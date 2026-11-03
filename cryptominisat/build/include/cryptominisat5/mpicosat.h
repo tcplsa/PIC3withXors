@@ -1,1 +1,1 @@
-/home/lyj238/wdl/blif/cryptominisat/src/mpicosat/mpicosat.h
+/home/wudl/blif/cryptominisat/src/mpicosat/mpicosat.h

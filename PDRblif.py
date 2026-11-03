@@ -363,11 +363,15 @@ def extract_state_from_sat(sat, s, succ, index):
     
     
     assumptions.sort(key=cmp_to_key(lit_cmp))
-    # for i in range(0, len(assumptions)):
-    #     if assumptions[i] >= num_inputs + num_latches + 2:
-    #         assumptions[i] = assumptions[i] + distance
-    #     elif assumptions[i] <= - (num_inputs + num_latches + 2):
-    #         assumptions[i] = assumptions[i] - distance
+    # `lift` has a single unprimed variable block.  Values read from the
+    # predecessor solver's primed input block must be translated back before
+    # becoming lift assumptions.  Leaving them in the primed range makes the
+    # lifting query spuriously SAT on multi-frame obligations.
+    for i in range(0, len(assumptions)):
+        if assumptions[i] >= num_inputs + num_latches + 2:
+            assumptions[i] = assumptions[i] - distance
+        elif assumptions[i] <= -(num_inputs + num_latches + 2):
+            assumptions[i] = -(-assumptions[i] - distance)
             
     lift.assume(act_var)
     for l in assumptions:
@@ -1559,4 +1563,3 @@ def _independent_verify(lemma_clauses, bad_signal):
         'inductive_ok': c2_ok,
         'bad_ok': c3_ok,
     }
-

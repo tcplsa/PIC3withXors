@@ -26,6 +26,10 @@ extern "C" CMSSolver cmsat_create() {
     return new SATSolver();
 }
 
+extern "C" CMSSolver cmsat_create_with_interrupt(void* interrupt_flag) {
+    return new SATSolver(nullptr, static_cast<std::atomic<bool>*>(interrupt_flag));
+}
+
 extern "C" void cmsat_destroy(CMSSolver solver) {
     delete solver;
 }
@@ -118,6 +122,10 @@ extern "C" void cmsat_simplify(CMSSolver solver) {
     solver->simplify();
 }
 
+extern "C" void cmsat_free_buffer(void* buffer) {
+    free(buffer);
+}
+
 // ===================== XOR 支持 =====================
 
 extern "C" bool cmsat_add_xor_gate(CMSSolver solver, unsigned a, unsigned b, unsigned c) {
@@ -144,4 +152,37 @@ extern "C" bool cmsat_add_xor_clause_lits(CMSSolver solver, const int* lits, int
 
 extern "C" void cmsat_set_seed(CMSSolver solver, unsigned seed) {
     solver->set_seed(seed);
+}
+
+// ===================== XOR/Gaussian and observability =====================
+
+extern "C" void cmsat_enable_gauss(CMSSolver solver) {
+    solver->set_allow_otf_gauss();
+}
+
+extern "C" bool cmsat_disable_gauss(CMSSolver solver) {
+    return solver->set_no_gauss();
+}
+
+extern "C" void cmsat_set_no_simplify_at_startup(CMSSolver solver) {
+    solver->set_no_simplify_at_startup();
+}
+
+extern "C" uint64_t cmsat_get_last_conflicts(CMSSolver solver) {
+    return solver->get_last_conflicts();
+}
+
+extern "C" uint64_t cmsat_get_last_decisions(CMSSolver solver) {
+    return solver->get_last_decisions();
+}
+
+extern "C" uint64_t cmsat_get_last_propagations(CMSSolver solver) {
+    return solver->get_last_propagations();
+}
+
+extern "C" void cmsat_get_gauss_stats(CMSSolver solver, uint64_t* checks,
+    uint64_t* row_xors, uint64_t* propagations, uint64_t* conflicts,
+    uint64_t* matrices, uint64_t* rows, uint64_t* columns) {
+    solver->get_gauss_stats(*checks, *row_xors, *propagations, *conflicts,
+                            *matrices, *rows, *columns);
 }

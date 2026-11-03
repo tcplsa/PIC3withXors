@@ -578,6 +578,26 @@ DLL_PUBLIC void SATSolver::set_allow_otf_gauss()
     }
 }
 
+DLL_PUBLIC bool SATSolver::set_no_gauss()
+{
+    for (auto & solver : data->solvers) {
+        Solver& s = *solver;
+        // This API is called by PDR only between solve calls, when CMSat is at
+        // decision level zero.  Moving equations out of the matrices restores
+        // their plain-XOR watches, so disabling Gaussian reasoning does not
+        // drop any transition constraint.
+        // A false return means the solver is already inconsistent at level
+        // zero, not that matrix removal failed.  The matrices are deleted in
+        // either case, so report the mode transition as completed.
+        s.clear_gauss_matrices(false);
+        s.conf.doFindXors = false;
+        s.conf.gaussconf.max_num_matrices = 0;
+        s.conf.gaussconf.autodisable = false;
+        s.conf.allow_elim_xor_vars = false;
+    }
+    return true;
+}
+
 DLL_PUBLIC void SATSolver::set_no_simplify_at_startup()
 {
     for (auto & solver : data->solvers) {
@@ -1303,6 +1323,16 @@ DLL_PUBLIC uint64_t SATSolver::get_last_propagations()
 DLL_PUBLIC uint64_t SATSolver::get_last_decisions()
 {
     return get_sum_decisions() - data->previous_sum_decisions;
+}
+
+DLL_PUBLIC void SATSolver::get_gauss_stats(uint64_t& checks,
+    uint64_t& row_xors, uint64_t& propagations, uint64_t& conflicts,
+    uint64_t& matrices, uint64_t& rows, uint64_t& columns) const
+{
+    checks = row_xors = propagations = conflicts = matrices = rows = columns = 0;
+    for (const Solver* solver : data->solvers)
+        solver->get_gauss_stats(checks, row_xors, propagations, conflicts,
+            matrices, rows, columns);
 }
 
 

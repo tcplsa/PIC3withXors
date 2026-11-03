@@ -308,6 +308,9 @@ class Solver : public Searcher
         vector<Xor> get_recovered_xors();
         bool init_all_matrices();
         bool find_and_init_all_matrices();
+        void get_gauss_stats(uint64_t& checks, uint64_t& row_xors,
+            uint64_t& propagations, uint64_t& conflicts, uint64_t& matrices,
+            uint64_t& rows, uint64_t& columns) const;
         void detach_clauses_in_xors();
         vector<Lit> tmp_repr;
         bool check_clause_represented_by_xor(const Clause& cl);

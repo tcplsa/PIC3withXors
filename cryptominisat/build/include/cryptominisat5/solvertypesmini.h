@@ -1,1 +1,1 @@
-/home/lyj238/wdl/blif/cryptominisat/src/solvertypesmini.h
+/home/wudl/blif/cryptominisat/src/solvertypesmini.h

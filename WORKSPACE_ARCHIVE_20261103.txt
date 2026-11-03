@@ -1,0 +1,5 @@
+Workspace snapshot before local project cleanup, 2026-11-03.
+Preserves tracked working-tree changes and non-build untracked files.
+Outer Modelchecker launchers, when present, are in legacy_launchers/.
+Ignored build outputs and historical modelchecker-* executables are omitted.
+Existing published branches are unchanged. This is an archive, not a new validated release.

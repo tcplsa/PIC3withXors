@@ -93,6 +93,12 @@ class EGaussian {
     void update_matrix_no(uint32_t n);
     void check_watchlist_sanity();
     uint32_t get_matrix_no();
+    uint64_t get_work_checks() const;
+    uint64_t get_row_xors() const;
+    uint64_t get_useful_propagations() const;
+    uint64_t get_useful_conflicts() const;
+    uint32_t get_num_rows() const;
+    uint32_t get_num_cols() const;
     void finalize_frat();
     void delete_reasons();
     void move_back_xor_clauses();
@@ -228,5 +234,21 @@ inline double EGaussian::get_density()
 inline void EGaussian::update_matrix_no(uint32_t n) { matrix_no = n; }
 inline uint32_t EGaussian::get_matrix_no() { return matrix_no; }
 inline bool EGaussian::is_initialized() const { return initialized; }
+inline uint64_t EGaussian::get_work_checks() const
+{
+    return elim_called + find_truth_ret_satisfied_precheck
+        + find_truth_called_propgause;
+}
+inline uint64_t EGaussian::get_row_xors() const { return elim_xored_rows; }
+inline uint64_t EGaussian::get_useful_propagations() const
+{
+    return find_truth_ret_prop + elim_ret_prop;
+}
+inline uint64_t EGaussian::get_useful_conflicts() const
+{
+    return find_truth_ret_confl + elim_ret_confl;
+}
+inline uint32_t EGaussian::get_num_rows() const { return num_rows; }
+inline uint32_t EGaussian::get_num_cols() const { return num_cols; }
 
 }

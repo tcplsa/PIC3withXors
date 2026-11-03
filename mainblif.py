@@ -211,13 +211,15 @@ def _pdr_blif_worker(blif, seed, solver_backend, result_queue):
     import random
     import os
     import PDRblif
+    import Class
     random.seed(seed)
     os.environ["BLIF_SOLVER_BACKEND"] = solver_backend
+    Class.reset_cmsat_totals()
     PDRblif._worker_silent = True  # 抑制 worker 内部的打印
     start = time.perf_counter()
     result, log, extra = pdr_main(blif)
     elapsed = time.perf_counter() - start
-    result_queue.put((result, log, elapsed, seed, extra))
+    result_queue.put((result, log, elapsed, seed, extra, Class.get_cmsat_totals()))
 
 
 def main(args):
@@ -247,8 +249,8 @@ def main(args):
             i += 1
     
     if filepath is None:
-        filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/cmugigamax.blif"
-        # filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/oski15a14b01s.blif"
+        # filepath = "/home/lyj238/wdl/data/hwmcc15-benchmarks-single-blif-xor/cmugigamax.blif"
+        filepath = "/home/wudl/test_tools/compare/data/oski15a14b01s.blif"
     
     if witness:
         print("Witness 模式: 将导出归纳不变式 / 反例路径")
@@ -294,7 +296,7 @@ def main(args):
             procs.append(p)
             p.start()
 
-        result, log, elapsed, winner_seed, extra = q.get()  # 等第一个完成
+        result, log, elapsed, winner_seed, extra, cmsat_totals = q.get()  # 等第一个完成
         total_elapsed = time.perf_counter() - pre_start_time  # 先计时
         for p in procs:
             p.terminate()
@@ -312,6 +314,8 @@ def main(args):
             print(f"单实例模式: seed={base_seed}")
         result, log, extra = pdr_main(blif)
         total_elapsed = time.perf_counter() - start_time
+        import Class
+        cmsat_totals = Class.get_cmsat_totals()
 
     # 输出统计数据（从 worker 移到主进程，保证顺序）
     log.print_statistics()
@@ -326,6 +330,10 @@ def main(args):
 
     print(f"Preprocessing time: {pre_time:.6f} seconds")
     print(f"Elapsed time: {total_elapsed:.6f} seconds")
+    if solver_backend == "cmsat":
+        print(f"cmsat_conflicts={cmsat_totals['conflicts']}")
+        print(f"cmsat_decisions={cmsat_totals['decisions']}")
+        print(f"cmsat_propagations={cmsat_totals['propagations']}")
 
     # ★ --witness 模式下导出归纳不变式 / 反例到 run_logs/ 文件夹
     if witness:

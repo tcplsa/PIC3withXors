@@ -1,11 +1,63 @@
 import subprocess
 import os
+import glob
 import tempfile
 from typing import List, Dict, Set, Optional, Tuple
 import ctypes
 
+# ============================================================
+# 自动路径解析 —— 无需硬编码绝对路径
+# ============================================================
+_BLIF_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _find_lib(name: str, search_dir: str = None) -> str:
+    """在指定目录及其常见子目录中查找共享库 (.so)"""
+    if search_dir is None:
+        search_dir = _BLIF_DIR
+    candidates = [
+        os.path.join(search_dir, name),
+        os.path.join(search_dir, "cryptominisat", "build", "lib", name),
+        os.path.join(search_dir, "build", "lib", name),
+        os.path.join(search_dir, "build", name),
+        os.path.join(search_dir, "lib", name),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return os.path.abspath(p)
+    # 回退：递归搜索
+    matches = glob.glob(os.path.join(search_dir, "**", name), recursive=True)
+    if matches:
+        return os.path.abspath(matches[0])
+    raise FileNotFoundError(
+        f"找不到 {name}，已搜索: {search_dir} 及其子目录"
+    )
+
+
+def _register_functions(lib: ctypes.CDLL, specs: Dict[str, dict]) -> None:
+    """批量注册 ctypes 函数签名 (argtypes / restype)"""
+    for name, spec in specs.items():
+        func = getattr(lib, name)
+        if "restype" in spec:
+            func.restype = spec["restype"]
+        if "argtypes" in spec:
+            func.argtypes = spec["argtypes"]
+
 
 state_count = 0
+
+# Kept per worker process.  PDR creates several incremental solvers, so a
+# solver-local counter would hide the total CDCL work of one PDR execution.
+_cmsat_totals = {"conflicts": 0, "decisions": 0, "propagations": 0}
+
+
+def reset_cmsat_totals() -> None:
+    for key in _cmsat_totals:
+        _cmsat_totals[key] = 0
+
+
+def get_cmsat_totals() -> Dict[str, int]:
+    return dict(_cmsat_totals)
 
 
 class Variable:
@@ -65,85 +117,157 @@ class SATSolver:
 
     def _init_cryptominisat(self):
         """初始化 CryptoMiniSat 后端"""
-        cms_lib_path = os.path.abspath(
-            "/home/lyj238/wdl/blif/cryptominisat/build/lib/libcryptominisat5.so"
-        )
+        # 自动查找 cryptominisat 核心库
+        cms_lib_path = _find_lib("libcryptominisat5.so")
         ctypes.CDLL(cms_lib_path, mode=ctypes.RTLD_GLOBAL)
-        
-        lib_path = os.path.abspath("/home/lyj238/wdl/blif/libcmsat_wrapper.so")
+
+        # 自动查找 wrapper 库
+        lib_path = _find_lib("libcmsat_wrapper.so")
         self.lib = ctypes.CDLL(lib_path)
         self._setup_cmsat_functions()
         self.solver = self.lib.cmsat_create()
         seed_str = os.environ.get("CMSAT_SEED", "")
         if seed_str:
             self.lib.cmsat_set_seed(self.solver, int(seed_str))
+        if os.environ.get("CMSAT_GAUSS", "0") == "1":
+            self.lib.cmsat_enable_gauss(self.solver)
         self.backend = "cmsat"
     
     def _init_minisat(self):
         """初始化 MiniSat 后端"""
-        lib_path = os.path.abspath("/home/lyj238/wdl/IC3/libminisat_wrapper.so")
+        lib_path = _find_lib("libminisat_wrapper.so")
         self.lib = ctypes.CDLL(lib_path)
         self._setup_minisat_functions()
         self.solver = self.lib.minisat_create()
         self.backend = "minisat"
     
     def _setup_cmsat_functions(self):
-        """设置 CryptoMiniSat C++ 库函数原型"""
-        self.lib.cmsat_create.restype = ctypes.c_void_p
-        self.lib.cmsat_destroy.argtypes = [ctypes.c_void_p]
-        self.lib.cmsat_add_clause.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
-        self.lib.cmsat_add_clause.restype = ctypes.c_bool
-        self.lib.cmsat_solve.argtypes = [ctypes.c_void_p]
-        self.lib.cmsat_solve.restype = ctypes.c_int
-        self.lib.cmsat_solve_with_assumptions.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
-        self.lib.cmsat_solve_with_assumptions.restype = ctypes.c_int
-        self.lib.cmsat_model_value.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        self.lib.cmsat_model_value.restype = ctypes.c_int
-        self.lib.cmsat_max_var.argtypes = [ctypes.c_void_p]
-        self.lib.cmsat_max_var.restype = ctypes.c_int
-        self.lib.cmsat_get_conflict.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
-        self.lib.cmsat_get_conflict.restype = ctypes.POINTER(ctypes.c_int)
-        self.lib.cmsat_var_enlarge_to.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        self.lib.cmsat_var_enlarge_to.restype = None
-        self.lib.cmsat_simplify.argtypes = [ctypes.c_void_p]
-        self.lib.cmsat_simplify.restype = None
-        self.lib.cmsat_add_xor_gate.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
-        self.lib.cmsat_add_xor_gate.restype = ctypes.c_bool
-        self.lib.cmsat_add_xor_clause_lits.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_bool]
-        self.lib.cmsat_add_xor_clause_lits.restype = ctypes.c_bool
-        self.lib.cmsat_set_seed.argtypes = [ctypes.c_void_p, ctypes.c_uint]
-        self.lib.cmsat_set_seed.restype = None
+        """设置 CryptoMiniSat C++ 库函数原型（字典驱动）"""
+        _register_functions(self.lib, {
+            "cmsat_create":              {"restype": ctypes.c_void_p},
+            "cmsat_destroy":             {"argtypes": [ctypes.c_void_p]},
+            "cmsat_add_clause": {
+                "argtypes": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int],
+                "restype":  ctypes.c_bool,
+            },
+            "cmsat_solve": {
+                "argtypes": [ctypes.c_void_p],
+                "restype":  ctypes.c_int,
+            },
+            "cmsat_solve_with_assumptions": {
+                "argtypes": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int],
+                "restype":  ctypes.c_int,
+            },
+            "cmsat_model_value": {
+                "argtypes": [ctypes.c_void_p, ctypes.c_int],
+                "restype":  ctypes.c_int,
+            },
+            "cmsat_max_var": {
+                "argtypes": [ctypes.c_void_p],
+                "restype":  ctypes.c_int,
+            },
+            "cmsat_get_conflict": {
+                "argtypes": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)],
+                "restype":  ctypes.POINTER(ctypes.c_int),
+            },
+            "cmsat_var_enlarge_to": {
+                "argtypes": [ctypes.c_void_p, ctypes.c_int],
+                "restype":  None,
+            },
+            "cmsat_simplify": {
+                "argtypes": [ctypes.c_void_p],
+                "restype":  None,
+            },
+            "cmsat_add_xor_gate": {
+                "argtypes": [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint],
+                "restype":  ctypes.c_bool,
+            },
+            "cmsat_add_xor_clause_lits": {
+                "argtypes": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_bool],
+                "restype":  ctypes.c_bool,
+            },
+            "cmsat_set_seed": {
+                "argtypes": [ctypes.c_void_p, ctypes.c_uint],
+                "restype":  None,
+            },
+            "cmsat_enable_gauss": {
+                "argtypes": [ctypes.c_void_p],
+                "restype":  None,
+            },
+            "cmsat_get_last_conflicts": {
+                "argtypes": [ctypes.c_void_p],
+                "restype":  ctypes.c_uint64,
+            },
+            "cmsat_get_last_decisions": {
+                "argtypes": [ctypes.c_void_p],
+                "restype":  ctypes.c_uint64,
+            },
+            "cmsat_get_last_propagations": {
+                "argtypes": [ctypes.c_void_p],
+                "restype":  ctypes.c_uint64,
+            },
+        })
 
     def _setup_minisat_functions(self):
-        """设置 MiniSat C++ 库函数原型"""
-        self.lib.minisat_create.restype = ctypes.c_void_p
-        self.lib.minisat_destroy.argtypes = [ctypes.c_void_p]
-        self.lib.minisat_add_clause.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
-        self.lib.minisat_add_clause.restype = ctypes.c_bool
-        self.lib.minisat_solve.argtypes = [ctypes.c_void_p, ctypes.c_bool]
-        self.lib.minisat_solve.restype = ctypes.c_int
-        self.lib.minisat_set_assumptions.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
-        self.lib.minisat_model_value.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        self.lib.minisat_model_value.restype = ctypes.c_int
-        self.lib.minisat_max_var.argtypes = [ctypes.c_void_p]
-        self.lib.minisat_max_var.restype = ctypes.c_int
-        self.lib.minisat_clear_assumptions.argtypes = [ctypes.c_void_p]
-        self.lib.minisat_get_failed_assumptions.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
-        self.lib.minisat_get_failed_assumptions.restype = ctypes.POINTER(ctypes.c_int)
-        self.lib.minisat_var_enlarge_to.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        self.lib.minisat_var_enlarge_to.restype = None
-        self.lib.minisat_simplify.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
-        self.lib.minisat_simplify.restype = ctypes.POINTER(ctypes.c_int)
-        self.lib.minisat_free_simplified_cnf.argtypes = [ctypes.POINTER(ctypes.c_int)]
-        self.lib.minisat_free_simplified_cnf.restype = None
-        self.lib.minisat_perform_simplify.argtypes = [ctypes.c_void_p]
-        self.lib.minisat_perform_simplify.restype = None
-        self.lib.minisat_get_raw_cnf.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
-        self.lib.minisat_get_raw_cnf.restype = ctypes.POINTER(ctypes.c_int)
-        self.lib.minisat_freeze_var.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        self.lib.minisat_freeze_var.restype = None
-        self.lib.minisat_unfreeze_var.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        self.lib.minisat_unfreeze_var.restype = None
+        """设置 MiniSat C++ 库函数原型（字典驱动）"""
+        _register_functions(self.lib, {
+            "minisat_create":              {"restype": ctypes.c_void_p},
+            "minisat_destroy":             {"argtypes": [ctypes.c_void_p]},
+            "minisat_add_clause": {
+                "argtypes": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int],
+                "restype":  ctypes.c_bool,
+            },
+            "minisat_solve": {
+                "argtypes": [ctypes.c_void_p, ctypes.c_bool],
+                "restype":  ctypes.c_int,
+            },
+            "minisat_set_assumptions": {
+                "argtypes": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int],
+            },
+            "minisat_model_value": {
+                "argtypes": [ctypes.c_void_p, ctypes.c_int],
+                "restype":  ctypes.c_int,
+            },
+            "minisat_max_var": {
+                "argtypes": [ctypes.c_void_p],
+                "restype":  ctypes.c_int,
+            },
+            "minisat_clear_assumptions": {
+                "argtypes": [ctypes.c_void_p],
+            },
+            "minisat_get_failed_assumptions": {
+                "argtypes": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)],
+                "restype":  ctypes.POINTER(ctypes.c_int),
+            },
+            "minisat_var_enlarge_to": {
+                "argtypes": [ctypes.c_void_p, ctypes.c_int],
+                "restype":  None,
+            },
+            "minisat_simplify": {
+                "argtypes": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)],
+                "restype":  ctypes.POINTER(ctypes.c_int),
+            },
+            "minisat_free_simplified_cnf": {
+                "argtypes": [ctypes.POINTER(ctypes.c_int)],
+                "restype":  None,
+            },
+            "minisat_perform_simplify": {
+                "argtypes": [ctypes.c_void_p],
+                "restype":  None,
+            },
+            "minisat_get_raw_cnf": {
+                "argtypes": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)],
+                "restype":  ctypes.POINTER(ctypes.c_int),
+            },
+            "minisat_freeze_var": {
+                "argtypes": [ctypes.c_void_p, ctypes.c_int],
+                "restype":  None,
+            },
+            "minisat_unfreeze_var": {
+                "argtypes": [ctypes.c_void_p, ctypes.c_int],
+                "restype":  None,
+            },
+        })
 
     def __del__(self):
         """析构函数"""
@@ -291,6 +415,12 @@ class SATSolver:
             self.solve_result = self.UNKNOWN
             self.var_values.clear()
             self.failed_assumptions.clear()
+        for name, getter in (
+            ("conflicts", self.lib.cmsat_get_last_conflicts),
+            ("decisions", self.lib.cmsat_get_last_decisions),
+            ("propagations", self.lib.cmsat_get_last_propagations),
+        ):
+            _cmsat_totals[name] += int(getter(self.solver))
         return self.solve_result
     
     def _minisat_solve(self, simplify: bool = True) -> int:

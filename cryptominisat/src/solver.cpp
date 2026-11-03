@@ -3162,6 +3162,22 @@ bool Solver::init_all_matrices() {
     return okay();
 }
 
+void Solver::get_gauss_stats(uint64_t& checks, uint64_t& row_xors,
+    uint64_t& propagations, uint64_t& conflicts, uint64_t& matrices,
+    uint64_t& rows, uint64_t& columns) const
+{
+    for (const EGaussian* matrix : gmatrices) {
+        if (matrix == nullptr) continue;
+        matrices++;
+        checks += matrix->get_work_checks();
+        row_xors += matrix->get_row_xors();
+        propagations += matrix->get_useful_propagations();
+        conflicts += matrix->get_useful_conflicts();
+        rows += matrix->get_num_rows();
+        columns += matrix->get_num_cols();
+    }
+}
+
 void Solver::start_getting_constraints(bool red, bool simplified,
         uint32_t max_len, uint32_t max_glue) {
     assert(get_clause_query == nullptr);
